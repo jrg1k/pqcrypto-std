@@ -1,5 +1,5 @@
 [package]
-name = "kyber-rs"
+name = "pqcrypto-std"
 version = "0.1.0"
 edition = "2021"
 authors = ["Jørgen Kristensen <jk@bitnor.org>"]

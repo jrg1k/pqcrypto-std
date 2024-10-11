@@ -1,4 +1,4 @@
-use kyber_rs::{
+use pqcrypto_std::{
     kyber::{self, Q},
     reduce::{mont_mul, to_mont, R_MOD_Q},
 };
