@@ -4,3 +4,4 @@ pub mod kyber;
 pub mod reduce;
 
 mod hash;
+mod compress;
