@@ -13,6 +13,8 @@ pub const N: usize = 256;
 pub const K: usize = 3;
 pub const ETA1: usize = 2;
 pub const Q: i16 = 3329;
+pub const DU: usize = 10;
+pub const DV: usize = 4;
 
 const COEFFICIENT_BITSIZE: usize = 12;
 
@@ -37,6 +39,7 @@ struct Poly {
 
 impl Poly {
     const ENCODED_BYTES: usize = (COEFFICIENT_BITSIZE * N) / 8;
+    const COMPRESSED_BYTES: usize = (N * DV) / 8;
 
     const fn zero() -> Self {
         Self { f: [0; N] }
@@ -260,6 +263,7 @@ struct PolyVec {
 
 impl PolyVec {
     const BYTE_SIZE: usize = K * Poly::ENCODED_BYTES;
+    const COMPRESSED_BYTES: usize = K * (N * DU) / 8;
 
     const fn zero() -> Self {
         Self {
