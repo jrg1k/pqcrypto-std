@@ -1,8 +1,10 @@
 use crate::{
+    compress::{compr_4bit, decompr_4bit},
     hash,
     reduce::{self, barrett_reduce},
 };
 use core::{
+    array,
     fmt::Display,
     mem::{self, MaybeUninit},
 };
@@ -211,6 +213,23 @@ impl Poly {
 
         Self {
             f: unsafe { mem::transmute::<[MaybeUninit<i16>; N], [i16; N]>(coeffs) },
+        }
+    }
+
+    fn compress(&self, bytes: &mut [u8; Self::COMPRESSED_BYTES]) {
+        for (b, a) in bytes.iter_mut().zip(self.f.chunks_exact(2)) {
+            let c: [u8; 2] = array::from_fn(|i| compr_4bit(a[i]));
+
+            *b = c[0] | c[1] << 4;
+        }
+    }
+
+    fn decompress(&mut self, bytes: &[u8; Self::COMPRESSED_BYTES]) {
+        const MOD_MASK: u8 = (1 << DV) - 1;
+
+        for (a, b) in self.f.chunks_exact_mut(2).zip(bytes.iter()) {
+            a[0] = decompr_4bit(b & MOD_MASK);
+            a[1] = decompr_4bit(b >> DV);
         }
     }
 }
