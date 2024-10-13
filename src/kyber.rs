@@ -1,5 +1,5 @@
 use crate::{
-    compress::{compr_4bit, decompr_4bit},
+    compress::{compr_10bit, compr_4bit, decompr_10bit, decompr_4bit},
     hash,
     reduce::{self, barrett_reduce},
 };
@@ -320,6 +320,40 @@ impl PolyVec {
         }
 
         Self { vec }
+    }
+
+    fn compress(&self, bytes: &mut [u8; Self::COMPRESSED_BYTES]) {
+        for (p, b) in self
+            .vec
+            .iter()
+            .zip(bytes.chunks_exact_mut(Poly::COMPRESSED_BYTES))
+        {
+            for (b, a) in b.chunks_exact_mut(5).zip(p.f.chunks_exact(4)) {
+                let t: [u16; 4] = array::from_fn(|i| compr_10bit(a[i]));
+
+                b[0] = t[0] as u8;
+                b[1] = ((t[0] >> 8) | (t[1] << 2)) as u8;
+                b[2] = ((t[1] >> 6) | (t[2] << 4)) as u8;
+                b[3] = ((t[2] >> 4) | (t[3] << 6)) as u8;
+                b[4] = (t[3] >> 2) as u8;
+            }
+        }
+    }
+
+    fn decompress(&mut self, bytes: &[u8; Self::COMPRESSED_BYTES]) {
+        for (b, p) in bytes.iter().zip(self.vec.iter_mut()) {
+            for (a, b) in p.f.chunks_exact_mut(4).zip(bytes.chunks_exact(5)) {
+                let mut t: [u16; 5] = array::from_fn(|i| b[i] as u16);
+                t[0] |= t[1] << 8;
+                t[1] = t[1] >> 2 | t[2] >> 6;
+                t[2] = t[2] >> 4 | t[3] >> 4;
+                t[3] = t[3] >> 6 | t[4] >> 3;
+
+                for i in &t[..4] {
+                    a[0] = decompr_10bit(i & 0x3FF);
+                }
+            }
+        }
     }
 }
 
