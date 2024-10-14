@@ -234,6 +234,20 @@ impl Poly {
     }
 
     #[inline]
+    fn generate_eta2<I>(r: &[u8; 32], nonce: &mut I) -> Self
+    where
+        I: Iterator<Item = usize>,
+    {
+        let mut poly = Poly::zero();
+
+        let prf = hash::prf(r, nonce.next().unwrap());
+
+        poly.sample_poly_cbd2(prf);
+
+        poly
+    }
+
+    #[inline]
     fn from_msg(m: &[u8; 32]) -> Self {
         let mut poly = Poly::zero();
 
@@ -368,6 +382,38 @@ impl PolyVec {
                 }
             }
         }
+    }
+
+    #[inline]
+    fn generate_eta1<I>(r: &[u8; 32], nonce: &mut I) -> Self
+    where
+        I: Iterator<Item = usize>,
+    {
+        let mut pvec = PolyVec::zero();
+
+        for (poly, nonce) in pvec.vec.iter_mut().zip(nonce) {
+            let prf = hash::prf(r, nonce);
+
+            poly.sample_poly_cbd2(prf);
+        }
+
+        pvec
+    }
+
+    #[inline]
+    fn generate_eta2<I>(r: &[u8; 32], nonce: &mut I) -> Self
+    where
+        I: Iterator<Item = usize>,
+    {
+        let mut pvec = PolyVec::zero();
+
+        for (poly, nonce) in pvec.vec.iter_mut().zip(nonce) {
+            let prf = hash::prf(r, nonce);
+
+            poly.sample_poly_cbd2(prf);
+        }
+
+        pvec
     }
 }
 
