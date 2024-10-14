@@ -720,7 +720,7 @@ pub fn keygen_deterministic(d: [u8; 32], z: [u8; 32]) -> (EncapsKey, DecapsKey) 
 
 #[cfg(test)]
 mod tests {
-    use serde::{Deserialize, Serialize};
+    use serde::Deserialize;
     use std::{fs::read_to_string, path::PathBuf};
 
     use super::*;
@@ -731,7 +731,7 @@ mod tests {
         test_data_path.push("tests/kyber-keygen.json");
 
         let test_data = read_to_string(&test_data_path).unwrap();
-        let test_data: Tests = serde_json::from_str(&test_data).unwrap();
+        let test_data: Tests<KeyGenTestGroup> = serde_json::from_str(&test_data).unwrap();
 
         for test_group in test_data
             .test_groups
@@ -769,7 +769,78 @@ mod tests {
         }
     }
 
-    #[derive(Serialize, Deserialize)]
+    #[test]
+    fn test_kem() {
+        let mut test_data_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        test_data_path.push("tests/kyber-kem.json");
+
+        let test_data = read_to_string(&test_data_path).unwrap();
+        let test_data: Tests<KemTestGroup> = serde_json::from_str(&test_data).unwrap();
+
+        for test_group in test_data
+            .test_groups
+            .iter()
+            .filter(|g| g.parameter_set == "ML-KEM-768")
+        {
+            match &test_group.params {
+                KemTestGroupKind::Aft { tests } => {
+                    for test in tests.iter() {
+                        assert_eq!(test.c.len(), EncapsKey::CIPHERTEXT_SIZE);
+                        let ek = EncapsKey::from_bytes(test.ek.as_slice().try_into().unwrap());
+                        let dk = DecapsKey::from_bytes(test.dk.as_slice().try_into().unwrap());
+
+                        let mut c = [0u8; EncapsKey::CIPHERTEXT_SIZE];
+                        let mut k = [0u8; 32];
+                        ek.encaps_internal(&mut c, &mut k, test.m.as_slice().try_into().unwrap());
+
+                        assert_eq!(c, test.c.as_slice());
+                        assert_eq!(k, test.k.as_slice());
+                    }
+                }
+                KemTestGroupKind::Val { tests, dk, ek } => {
+                    let ek = EncapsKey::from_bytes(ek.as_slice().try_into().unwrap());
+                    let dk = DecapsKey::from_bytes(dk.as_slice().try_into().unwrap());
+                    for test in tests.iter() {
+                        assert_eq!(test.c.len(), EncapsKey::CIPHERTEXT_SIZE);
+                    }
+                }
+            }
+        }
+    }
+
+    #[derive(Deserialize)]
+    struct Tests<T> {
+        algorithm: String,
+
+        #[serde(rename = "isSample")]
+        is_sample: bool,
+
+        mode: String,
+
+        revision: String,
+
+        #[serde(rename = "testGroups")]
+        test_groups: Vec<T>,
+
+        #[serde(rename = "vsId")]
+        vs_id: i64,
+    }
+
+    #[derive(Deserialize)]
+    struct KeyGenTestGroup {
+        #[serde(rename = "parameterSet")]
+        parameter_set: String,
+
+        #[serde(rename = "testType")]
+        test_type: String,
+
+        tests: Vec<KeyGenTestVector>,
+
+        #[serde(rename = "tgId")]
+        tg_id: i64,
+    }
+
+    #[derive(Deserialize)]
     struct KeyGenTestVector {
         #[serde(with = "hex")]
         d: [u8; 32],
@@ -789,35 +860,75 @@ mod tests {
         tc_id: i64,
     }
 
-    #[derive(Serialize, Deserialize)]
-    struct TestGroup {
+    #[derive(Deserialize)]
+    struct KemTestVectorAft {
+        #[serde(with = "hex")]
+        c: Vec<u8>,
+
+        deferred: bool,
+
+        #[serde(with = "hex")]
+        dk: Vec<u8>,
+
+        #[serde(with = "hex")]
+        ek: Vec<u8>,
+
+        #[serde(with = "hex")]
+        k: Vec<u8>,
+
+        #[serde(with = "hex")]
+        m: Vec<u8>,
+
+        reason: String,
+
+        #[serde(rename = "tcId")]
+        tc_id: i64,
+    }
+
+    #[derive(Deserialize)]
+    struct KemTestVectorVal {
+        #[serde(with = "hex")]
+        c: Vec<u8>,
+
+        deferred: bool,
+
+        #[serde(with = "hex")]
+        k: Vec<u8>,
+
+        reason: String,
+
+        #[serde(rename = "tcId")]
+        tc_id: i64,
+    }
+
+    #[derive(Deserialize)]
+    struct KemTestGroup {
+        function: String,
+
         #[serde(rename = "parameterSet")]
         parameter_set: String,
 
-        #[serde(rename = "testType")]
-        test_type: String,
-
-        tests: Vec<KeyGenTestVector>,
-
         #[serde(rename = "tgId")]
         tg_id: i64,
+
+        #[serde(flatten)]
+        params: KemTestGroupKind,
     }
 
-    #[derive(Serialize, Deserialize)]
-    struct Tests {
-        algorithm: String,
+    #[derive(Deserialize)]
+    #[serde(tag = "testType")]
+    enum KemTestGroupKind {
+        #[serde(rename = "AFT")]
+        Aft { tests: Vec<KemTestVectorAft> },
+        #[serde(rename = "VAL")]
+        Val {
+            tests: Vec<KemTestVectorVal>,
 
-        #[serde(rename = "isSample")]
-        is_sample: bool,
+            #[serde(with = "hex")]
+            dk: Vec<u8>,
 
-        mode: String,
-
-        revision: String,
-
-        #[serde(rename = "testGroups")]
-        test_groups: Vec<TestGroup>,
-
-        #[serde(rename = "vsId")]
-        vs_id: i64,
+            #[serde(with = "hex")]
+            ek: Vec<u8>,
+        },
     }
 }
