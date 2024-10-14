@@ -331,6 +331,20 @@ impl PolyVec {
         }
     }
 
+    #[inline]
+    fn ntt(&mut self) {
+        for p in self.vec.iter_mut() {
+            p.ntt();
+        }
+    }
+
+    #[inline]
+    fn invntt(&mut self) {
+        for p in self.vec.iter_mut() {
+            p.invntt();
+        }
+    }
+
     fn byte_encode<const BYTE_SIZE: usize>(&self, bytes: &mut [u8; BYTE_SIZE]) {
         for (p, buf) in self
             .vec
