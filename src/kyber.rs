@@ -520,6 +520,7 @@ struct PkeEncKey {
 
 impl PkeEncKey {
     const BYTE_SIZE: usize = PolyVec::BYTE_SIZE + 32;
+    const CIPHERTEXT_SIZE: usize = PolyVec::COMPRESSED_BYTES + Poly::COMPRESSED_BYTES;
 
     #[inline]
     fn to_bytes(&self, bytes: &mut [u8; Self::BYTE_SIZE]) {
@@ -535,6 +536,40 @@ impl PkeEncKey {
         t.reduce();
 
         Self { t, rho: *rho }
+    }
+
+    /// Algorithm 14 K-PKE.Encrypt(ek_PKE, m, r)
+    fn encrypt(&self, c: &mut [u8; Self::CIPHERTEXT_SIZE], m: &[u8; 32], r: &[u8; 32]) {
+        let at = PolyMatrix::generate_transposed(&self.rho);
+
+        let mut nonces = 0..(2 * K + 1);
+
+        let mut y = PolyVec::generate_eta1(r, &mut nonces);
+        let e1 = PolyVec::generate_eta2(r, &mut nonces);
+
+        let e2 = Poly::generate_eta2(r, &mut nonces);
+        y.ntt();
+
+        // u <- NTT^-1(A^T * y) + e_1
+        let mut u = &at * &y;
+        u.invntt();
+        u.add(&e1);
+        u.reduce();
+
+        let mu = Poly::from_msg(m);
+
+        // v <- NTT^-1(t^T * y) + e_2 + mu
+        let mut v = &self.t * &y;
+        v.invntt();
+        v.add(&e2);
+        v.add(&mu);
+        v.reduce();
+
+        let (c1, c2) = c.split_first_chunk_mut().unwrap();
+        let (c2, _) = c2.split_first_chunk_mut().unwrap();
+
+        u.compress(c1);
+        v.compress(c2);
     }
 }
 
