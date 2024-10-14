@@ -1,5 +1,5 @@
 use crate::{
-    compress::{compr_10bit, compr_4bit, decompr_10bit, decompr_4bit},
+    compress::{compr_10bit, compr_4bit, decompr_10bit, decompr_1bit, decompr_4bit},
     hash,
     reduce::{self, barrett_reduce},
 };
@@ -231,6 +231,19 @@ impl Poly {
             a[0] = decompr_4bit(b & MOD_MASK);
             a[1] = decompr_4bit(b >> DV);
         }
+    }
+
+    #[inline]
+    fn from_msg(m: &[u8; 32]) -> Self {
+        let mut poly = Poly::zero();
+
+        for (coeffs, byte) in poly.f.chunks_exact_mut(8).zip(m.iter()) {
+            for (a, bit) in coeffs.iter_mut().zip((0..8).map(|n| *byte >> n)) {
+                *a = decompr_1bit(bit);
+            }
+        }
+
+        poly
     }
 }
 
