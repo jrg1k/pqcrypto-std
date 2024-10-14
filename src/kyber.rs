@@ -295,7 +295,8 @@ struct PolyVec {
 
 impl PolyVec {
     const BYTE_SIZE: usize = K * Poly::ENCODED_BYTES;
-    const COMPRESSED_BYTES: usize = K * (N * DU) / 8;
+    const COMPRESSED_POLY_BYTES: usize = (N * DU) / 8;
+    const COMPRESSED_BYTES: usize = K * Self::COMPRESSED_POLY_BYTES;
 
     const fn zero() -> Self {
         Self {
@@ -339,7 +340,7 @@ impl PolyVec {
         for (p, b) in self
             .vec
             .iter()
-            .zip(bytes.chunks_exact_mut(Poly::COMPRESSED_BYTES))
+            .zip(bytes.chunks_exact_mut(Self::COMPRESSED_POLY_BYTES))
         {
             for (b, a) in b.chunks_exact_mut(5).zip(p.f.chunks_exact(4)) {
                 let t: [u16; 4] = array::from_fn(|i| compr_10bit(a[i]));
