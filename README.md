@@ -14,6 +14,6 @@ Only supports Kyber768.
 
 - [x] Key generation
 - [x] Key encoding/decoding
-- [ ] Compression
+- [x] Compression
 - [ ] Encaps/Decaps
 - [ ] Multiple parameter sets
