@@ -7,6 +7,7 @@ use core::{
     array,
     fmt::Display,
     mem::{self, MaybeUninit},
+    ops::Mul,
 };
 use rand_core::CryptoRngCore;
 use sha3::digest::XofReader;
@@ -417,6 +418,19 @@ impl PolyVec {
     }
 }
 
+impl Mul<&PolyVec> for &PolyVec {
+    type Output = Poly;
+
+    #[inline]
+    fn mul(self, rhs: &PolyVec) -> Self::Output {
+        let mut out = Poly::zero();
+
+        out.multiply_acc(self, rhs);
+
+        out
+    }
+}
+
 #[derive(Debug)]
 struct PolyMatrix {
     m: [PolyVec; K],
@@ -435,6 +449,19 @@ impl PolyMatrix {
         }
 
         Self { m }
+    }
+
+impl Mul<&PolyVec> for &PolyMatrix {
+    type Output = PolyVec;
+
+    fn mul(self, rhs: &PolyVec) -> Self::Output {
+        let mut out = PolyVec::zero();
+
+        for (poly, rowvec) in out.vec.iter_mut().zip(&self.m) {
+            poly.multiply_acc(rowvec, rhs);
+        }
+
+        out
     }
 }
 
