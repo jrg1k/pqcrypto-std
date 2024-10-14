@@ -1,6 +1,6 @@
 use crate::kyber::Q;
 
-const Q_HALF: i32 = Q as i32 / 2;
+const Q_HALF: i32 = (Q as i32 + 1) / 2;
 
 /// round(2^n / Q)
 const fn power_div_q(n: usize) -> i64 {
