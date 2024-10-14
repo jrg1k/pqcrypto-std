@@ -41,6 +41,12 @@ pub const fn decompr_10bit(y: u16) -> i16 {
     ((y + (1 << 9)) >> 10) as i16
 }
 
+/// y -> round((q/2) * y)
+pub const fn decompr_1bit(y: u8) -> i16 {
+    let y = -((y & 1) as i16);
+    y & Q_HALF as i16
+}
+
 #[test]
 fn test_compress() {
     for i in -Q..Q {
