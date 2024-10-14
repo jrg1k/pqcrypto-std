@@ -165,8 +165,8 @@ impl Poly {
     }
 
     fn multiply_acc(&mut self, a: &PolyVec, b: &PolyVec) {
-        for i in 0..K {
-            self.multiply_ntts_acc(&a.vec[i], &b.vec[i]);
+        for (f, g) in a.vec.iter().zip(b.vec.iter()) {
+            self.multiply_ntts_acc(f, g);
         }
 
         self.reduce();
