@@ -469,6 +469,22 @@ impl PolyMatrix {
         Self { m }
     }
 
+    #[inline]
+    fn generate_transposed(rho: &[u8; 32]) -> Self {
+        let mut m = [const { PolyVec::zero() }; K];
+
+        for (i, polyvec) in m.iter_mut().enumerate() {
+            for (j, poly) in polyvec.vec.iter_mut().enumerate() {
+                let xof = hash::xof(rho, i, j);
+
+                poly.sample_ntt(xof);
+            }
+        }
+
+        Self { m }
+    }
+}
+
 impl Mul<&PolyVec> for &PolyMatrix {
     type Output = PolyVec;
 
