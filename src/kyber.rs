@@ -619,6 +619,7 @@ pub struct EncapsKey {
 
 impl EncapsKey {
     pub const BYTE_SIZE: usize = PkeEncKey::BYTE_SIZE;
+    pub const CIPHERTEXT_SIZE: usize = PkeEncKey::CIPHERTEXT_SIZE;
 
     #[inline]
     pub fn to_bytes(&self, bytes: &mut [u8; Self::BYTE_SIZE]) {
@@ -629,6 +630,38 @@ impl EncapsKey {
         let ek_pke = PkeEncKey::from_bytes(bytes);
 
         Self { ek_pke }
+    }
+
+    /// Algorithm 17 ML-KEM.Encaps_internal(ek, m)
+    fn encaps_internal(
+        &self,
+        c: &mut [u8; PkeEncKey::CIPHERTEXT_SIZE],
+        k: &mut [u8; 32],
+        m: &[u8; 32],
+    ) {
+        let mut h = [0u8; 32];
+        let mut bytes = [0u8; Self::BYTE_SIZE];
+        self.to_bytes(&mut bytes);
+        hash::h(&mut h, &bytes);
+
+        let (key, r) = hash::g(&[m, &h]);
+
+        self.ek_pke.encrypt(c, m, &r);
+
+        k.copy_from_slice(&key);
+    }
+
+    /// Algorithm 20 ML-KEM.Encaps(ek)
+    #[inline]
+    pub fn encaps(
+        &self,
+        c: &mut [u8; Self::CIPHERTEXT_SIZE],
+        k: &mut [u8; 32],
+        rng: &mut impl CryptoRngCore,
+    ) {
+        let mut m = [0u8; 32];
+        rng.fill_bytes(&mut m);
+        self.encaps_internal(c, k, &m);
     }
 }
 
