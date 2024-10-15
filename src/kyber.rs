@@ -714,6 +714,7 @@ impl EncapsKey {
 
 pub struct DecapsKey {
     dk_pke: PkeDecKey,
+    h: [u8; 32],
     z: [u8; 32],
 }
 
@@ -737,13 +738,14 @@ impl DecapsKey {
         let (dk_bytes, bytes) = bytes.split_first_chunk().unwrap();
         let (_ek_bytes, bytes): (&[u8; PkeEncKey::BYTE_SIZE], _) =
             bytes.split_first_chunk().unwrap();
-        let (_hash_bytes, bytes): (&[u8; 32], _) = bytes.split_first_chunk().unwrap();
+        let (h, bytes) = bytes.split_first_chunk().unwrap();
         let (z_bytes, _) = bytes.split_first_chunk().unwrap();
 
         let dk_pke = PkeDecKey::from_bytes(dk_bytes);
 
         Self {
             dk_pke,
+            h: *h,
             z: *z_bytes,
         }
     }
@@ -762,7 +764,14 @@ pub fn keygen(rng: &mut impl CryptoRngCore) -> (EncapsKey, DecapsKey) {
 pub fn keygen_deterministic(d: [u8; 32], z: [u8; 32]) -> (EncapsKey, DecapsKey) {
     let (ek_pke, dk_pke) = pke_keygen(&d);
 
-    (EncapsKey { ek_pke }, DecapsKey { dk_pke, z })
+    let ek = EncapsKey { ek_pke };
+
+    let mut ek_bytes = [0u8; EncapsKey::BYTE_SIZE];
+    ek.to_bytes(&mut ek_bytes);
+    let mut h = [0u8; 32];
+    hash::h(&mut h, &ek_bytes);
+
+    (ek, DecapsKey { dk_pke, h, z })
 }
 
 #[cfg(test)]
