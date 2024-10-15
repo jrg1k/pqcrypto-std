@@ -822,7 +822,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn keygen() {
+    fn test_keygen() {
         let mut test_data_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         test_data_path.push("tests/kyber-keygen.json");
 
