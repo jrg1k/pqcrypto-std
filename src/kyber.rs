@@ -620,6 +620,24 @@ impl PkeDecKey {
 
         Self { s }
     }
+
+    /// Algorithm 15 K-PKE.Encrypt(dk_PKE, c)
+    fn decrypt(&self, m: &mut [u8; 32], c: &[u8; PkeEncKey::CIPHERTEXT_SIZE]) {
+        let (c1, c2) = c.split_first_chunk().unwrap();
+        let (c2, _) = c2.split_first_chunk().unwrap();
+
+        let mut u_prime = PolyVec::decompress(c1);
+        let mut v_prime = Poly::decompress(c2);
+
+        u_prime.ntt();
+        let mut w = &self.s * &u_prime;
+        w.invntt();
+
+        v_prime -= &w;
+        v_prime.reduce();
+
+        v_prime.to_msg(m);
+    }
 }
 
 fn pke_keygen(d: &[u8; 32]) -> (PkeEncKey, PkeDecKey) {
