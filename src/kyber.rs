@@ -7,7 +7,7 @@ use core::{
     array,
     fmt::Display,
     mem::{self, MaybeUninit},
-    ops::Mul,
+    ops::{Mul, SubAssign},
 };
 use rand_core::CryptoRngCore;
 use sha3::digest::XofReader;
@@ -266,6 +266,14 @@ impl Poly {
             for (i, a) in coeffs.iter().enumerate() {
                 *byte |= compr_1bit(*a) << i;
             }
+        }
+    }
+}
+
+impl SubAssign<&Poly> for Poly {
+    fn sub_assign(&mut self, rhs: &Poly) {
+        for (a, b) in self.f.iter_mut().zip(rhs.f.iter()) {
+            *a -= b;
         }
     }
 }
