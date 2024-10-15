@@ -225,13 +225,18 @@ impl Poly {
         }
     }
 
-    fn decompress(&mut self, bytes: &[u8; Self::COMPRESSED_BYTES]) {
+    #[inline]
+    fn decompress(bytes: &[u8; Self::COMPRESSED_BYTES]) -> Self {
         const MOD_MASK: u8 = (1 << DV) - 1;
 
-        for (a, b) in self.f.chunks_exact_mut(2).zip(bytes.iter()) {
+        let mut poly = Poly::zero();
+
+        for (a, b) in poly.f.chunks_exact_mut(2).zip(bytes.iter()) {
             a[0] = decompr_4bit(b & MOD_MASK);
             a[1] = decompr_4bit(b >> DV);
         }
+
+        poly
     }
 
     #[inline]
