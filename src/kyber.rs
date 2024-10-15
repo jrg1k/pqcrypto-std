@@ -816,6 +816,7 @@ pub fn keygen_deterministic(d: [u8; 32], z: [u8; 32]) -> (EncapsKey, DecapsKey) 
 
 #[cfg(test)]
 mod tests {
+    use rand_core::OsRng;
     use serde::Deserialize;
     use std::{fs::read_to_string, path::PathBuf};
 
@@ -913,22 +914,50 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_kem_random() {
+        let (ek, dk) = keygen(&mut OsRng);
+        let mut c = [0u8; EncapsKey::CIPHERTEXT_SIZE];
+        let mut k = [0u8; 32];
+        ek.encaps(&mut c, &mut k, &mut OsRng);
+
+        let mut k_prime = [0u8; 32];
+        dk.decaps(&mut k_prime, &ek, &c);
+
+        assert_eq!(&k, &k_prime);
+    }
+
+    fn gen_rand_bytes<const N: usize>(rng: &mut impl CryptoRngCore) -> [u8; N] {
+        let mut bytes = [0; N];
+        rng.fill_bytes(&mut bytes);
+        bytes
+    }
+
+    #[test]
+    fn test_compress() {
+        let compr_pvec = gen_rand_bytes(&mut OsRng);
+        let mut compr_pvec_prime = [0; PolyVec::COMPRESSED_BYTES];
+        let pvec = PolyVec::decompress(&compr_pvec);
+        pvec.compress(&mut compr_pvec_prime);
+        assert_eq!(&compr_pvec, &compr_pvec_prime);
+
+        let compr_poly = gen_rand_bytes(&mut OsRng);
+        let mut compr_poly_prime = [0; Poly::COMPRESSED_BYTES];
+        let poly = Poly::decompress(&compr_poly);
+        poly.compress(&mut compr_poly_prime);
+        assert_eq!(&compr_poly, &compr_poly_prime)
+    }
+
     #[derive(Deserialize)]
     struct Tests<T> {
-        algorithm: String,
-
         #[serde(rename = "isSample")]
-        is_sample: bool,
-
-        mode: String,
-
-        revision: String,
+        _is_sample: bool,
 
         #[serde(rename = "testGroups")]
         test_groups: Vec<T>,
 
         #[serde(rename = "vsId")]
-        vs_id: i64,
+        _vs_id: i64,
     }
 
     #[derive(Deserialize)]
@@ -937,12 +966,12 @@ mod tests {
         parameter_set: String,
 
         #[serde(rename = "testType")]
-        test_type: String,
+        _test_type: String,
 
         tests: Vec<KeyGenTestVector>,
 
         #[serde(rename = "tgId")]
-        tg_id: i64,
+        _tg_id: i64,
     }
 
     #[derive(Deserialize)]
@@ -953,8 +982,6 @@ mod tests {
         #[serde(with = "hex")]
         z: [u8; 32],
 
-        deferred: bool,
-
         #[serde(with = "hex")]
         dk: Vec<u8>,
 
@@ -962,15 +989,13 @@ mod tests {
         ek: Vec<u8>,
 
         #[serde(rename = "tcId")]
-        tc_id: i64,
+        _tc_id: i64,
     }
 
     #[derive(Deserialize)]
     struct KemTestVectorAft {
         #[serde(with = "hex")]
         c: Vec<u8>,
-
-        deferred: bool,
 
         #[serde(with = "hex")]
         dk: Vec<u8>,
@@ -984,10 +1009,8 @@ mod tests {
         #[serde(with = "hex")]
         m: Vec<u8>,
 
-        reason: String,
-
         #[serde(rename = "tcId")]
-        tc_id: i64,
+        _tc_id: i64,
     }
 
     #[derive(Deserialize)]
@@ -995,26 +1018,20 @@ mod tests {
         #[serde(with = "hex")]
         c: Vec<u8>,
 
-        deferred: bool,
-
         #[serde(with = "hex")]
         k: Vec<u8>,
 
-        reason: String,
-
         #[serde(rename = "tcId")]
-        tc_id: i64,
+        _tc_id: i64,
     }
 
     #[derive(Deserialize)]
     struct KemTestGroup {
-        function: String,
-
         #[serde(rename = "parameterSet")]
         parameter_set: String,
 
         #[serde(rename = "tgId")]
-        tg_id: i64,
+        _tg_id: i64,
 
         #[serde(flatten)]
         params: KemTestGroupKind,
