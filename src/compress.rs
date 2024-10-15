@@ -41,6 +41,16 @@ pub const fn decompr_10bit(y: u16) -> i16 {
     ((y + (1 << 9)) >> 10) as i16
 }
 
+/// x -> round((2 / Q) * x) (mod 2)
+pub const fn compr_1bit(x: i16) -> u8 {
+    const M: i32 = power_div_q(19 + 1) as i32;
+
+    let a = M * x as i32;
+    let div = (a + (1 << 18)) >> 19;
+
+    (div & 1) as u8
+}
+
 /// y -> round((q/2) * y)
 pub const fn decompr_1bit(y: u8) -> i16 {
     let y = -((y & 1) as i16);
@@ -50,6 +60,9 @@ pub const fn decompr_1bit(y: u8) -> i16 {
 #[test]
 fn test_compress() {
     for i in -Q..Q {
+        let compressed_1bit = i.rem_euclid(Q) as f64 * (2f64 / Q as f64);
+        assert_eq!(compr_1bit(i), compressed_1bit.round() as u8 % 2);
+
         let compressed_4bit = i.rem_euclid(Q) as f64 * (2f64.powi(4)) / Q as f64;
         assert_eq!(compr_4bit(i), compressed_4bit.round() as u8 % 16);
 
