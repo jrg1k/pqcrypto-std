@@ -751,6 +751,22 @@ impl DecapsKey {
         }
     }
 
+    // Algorithm 21 ML-KEM.Decaps(dk, c)
+    pub fn decaps(&self, k: &mut [u8; 32], ek: &EncapsKey, c: &[u8; EncapsKey::CIPHERTEXT_SIZE]) {
+        let mut m_prime = [0u8; 32];
+        self.dk_pke.decrypt(&mut m_prime, c);
+
+        let (k_prime, r_prime) = hash::g(&[&m_prime, &self.h]);
+
+        hash::j(k, &[&self.z, c]);
+
+        let mut c_prime = [0u8; EncapsKey::CIPHERTEXT_SIZE];
+        ek.ek_pke.encrypt(&mut c_prime, &m_prime, &r_prime);
+
+        cmov(k, &k_prime, bytes_is_eq(c, &c_prime));
+    }
+}
+
 /// Compare two byte arrays in constant time.
 /// Returns 1 if equal and 0 if not equal.
 const fn bytes_is_eq<const N: usize>(a: &[u8; N], b: &[u8; N]) -> u32 {
