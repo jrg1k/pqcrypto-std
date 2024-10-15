@@ -6,6 +6,7 @@ use crate::{
 use core::{
     array,
     fmt::Display,
+    hint::black_box,
     mem::{self, MaybeUninit},
     ops::{Mul, SubAssign},
 };
@@ -763,6 +764,15 @@ const fn bytes_is_eq<const N: usize>(a: &[u8; N], b: &[u8; N]) -> u32 {
     }
 
     (cond.wrapping_neg() >> 31) ^ 1
+}
+
+/// Move `src` into `dst` if `cond == 1` in constant time.
+fn cmov<const N: usize>(dst: &mut [u8; N], src: &[u8; N], cond: u32) {
+    let cond = black_box(cond).wrapping_neg() as u8;
+
+    for (a, b) in dst.iter_mut().zip(src.iter()) {
+        *a ^= cond & (*a ^ *b);
+    }
 }
 
 pub fn keygen(rng: &mut impl CryptoRngCore) -> (EncapsKey, DecapsKey) {
