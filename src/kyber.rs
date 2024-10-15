@@ -468,7 +468,11 @@ impl Mul<&PolyVec> for &PolyVec {
     fn mul(self, rhs: &PolyVec) -> Self::Output {
         let mut out = Poly::zero();
 
-        out.multiply_acc(self, rhs);
+        for (f, g) in self.vec.iter().zip(rhs.vec.iter()) {
+            out.multiply_ntts_acc(f, g);
+        }
+
+        out.reduce();
 
         out
     }
