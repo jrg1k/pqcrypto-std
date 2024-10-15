@@ -32,6 +32,15 @@ pub fn h(dst: &mut [u8; 32], src: &[u8]) {
 }
 
 #[inline]
+pub fn j(dst: &mut [u8; 32], src: &[&[u8]]) {
+    let mut hasher = Shake256::default();
+    for s in src {
+        hasher.update(s);
+    }
+    hasher.finalize_xof_into(dst);
+}
+
+#[inline]
 pub fn xof(rho: &[u8; 32], i: usize, j: usize) -> impl XofReader {
     let mut hasher = Shake128::default();
     hasher.update(rho);
