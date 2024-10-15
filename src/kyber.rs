@@ -23,7 +23,7 @@ pub const DV: usize = 4;
 const COEFFICIENT_BITSIZE: usize = 12;
 
 /// pre-computed zetas in montgomery form
-/// ordered by ZETAS[i] = z^BitRev7(i)
+/// ordered by ZETAS\[i\] = z^BitRev7(i)
 /// zeta -> zeta * R (mod Q)
 pub const ZETAS: [i16; 128] = [
     -1044, -758, -359, -1517, 1493, 1422, 287, 202, -171, 622, 1577, 182, 962, -1202, -1474, 1468,
