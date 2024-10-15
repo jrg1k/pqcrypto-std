@@ -801,7 +801,7 @@ pub fn keygen(rng: &mut impl CryptoRngCore) -> (EncapsKey, DecapsKey) {
     keygen_deterministic(d, z)
 }
 
-pub fn keygen_deterministic(d: [u8; 32], z: [u8; 32]) -> (EncapsKey, DecapsKey) {
+fn keygen_deterministic(d: [u8; 32], z: [u8; 32]) -> (EncapsKey, DecapsKey) {
     let (ek_pke, dk_pke) = pke_keygen(&d);
 
     let ek = EncapsKey { ek_pke };
