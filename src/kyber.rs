@@ -749,6 +749,20 @@ impl DecapsKey {
             z: *z_bytes,
         }
     }
+
+/// Compare two byte arrays in constant time.
+/// Returns 1 if equal and 0 if not equal.
+const fn bytes_is_eq<const N: usize>(a: &[u8; N], b: &[u8; N]) -> u32 {
+    let mut i = 0;
+    let mut cond = 0;
+
+    while i < N {
+        cond |= (a[i] ^ b[i]) as u32;
+
+        i += 1;
+    }
+
+    (cond.wrapping_neg() >> 31) ^ 1
 }
 
 pub fn keygen(rng: &mut impl CryptoRngCore) -> (EncapsKey, DecapsKey) {
