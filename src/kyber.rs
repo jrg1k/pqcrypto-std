@@ -891,6 +891,10 @@ mod tests {
 
                         assert_eq!(c, test.c.as_slice());
                         assert_eq!(k, test.k.as_slice());
+
+                        let mut k_prime = [0u8; 32];
+                        dk.decaps(&mut k_prime, &ek, &c);
+                        assert_eq!(&k, &k_prime);
                     }
                 }
                 KemTestGroupKind::Val { tests, dk, ek } => {
@@ -898,6 +902,11 @@ mod tests {
                     let dk = DecapsKey::from_bytes(dk.as_slice().try_into().unwrap());
                     for test in tests.iter() {
                         assert_eq!(test.c.len(), EncapsKey::CIPHERTEXT_SIZE);
+
+                        let mut k = [0u8; 32];
+                        dk.decaps(&mut k, &ek, test.c[..].try_into().unwrap());
+
+                        assert_eq!(&k, &test.k[..]);
                     }
                 }
             }
