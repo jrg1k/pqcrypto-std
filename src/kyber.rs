@@ -404,8 +404,10 @@ impl PolyVec {
         }
     }
 
-    fn decompress(&mut self, bytes: &[u8; Self::COMPRESSED_BYTES]) {
-        for (p, b) in self
+    #[inline]
+    fn decompress(bytes: &[u8; Self::COMPRESSED_BYTES]) -> Self {
+        let mut pvec = PolyVec::zero();
+        for (p, b) in pvec
             .vec
             .iter_mut()
             .zip(bytes.chunks_exact(Self::COMPRESSED_POLY_BYTES))
@@ -413,15 +415,17 @@ impl PolyVec {
             for (a, b) in p.f.chunks_exact_mut(4).zip(b.chunks_exact(5)) {
                 let mut t: [u16; 5] = array::from_fn(|i| b[i] as u16);
                 t[0] |= t[1] << 8;
-                t[1] = t[1] >> 2 | t[2] >> 6;
-                t[2] = t[2] >> 4 | t[3] >> 4;
-                t[3] = t[3] >> 6 | t[4] >> 3;
+                t[1] = t[1] >> 2 | t[2] << 6;
+                t[2] = t[2] >> 4 | t[3] << 4;
+                t[3] = t[3] >> 6 | (t[4] << 2);
 
-                for i in &t[..4] {
-                    a[0] = decompr_10bit(i & 0x3FF);
+                for (a, n) in a.iter_mut().zip(&t[..4]) {
+                    *a = decompr_10bit(n & 0x3FF);
                 }
             }
         }
+
+        pvec
     }
 
     #[inline]
