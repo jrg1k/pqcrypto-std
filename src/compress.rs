@@ -26,10 +26,10 @@ pub const fn decompr_4bit(y: u8) -> i16 {
 
 /// x -> round((2^10 / Q) * x) (mod 2^10)
 pub const fn compr_10bit(x: i16) -> u16 {
-    const M: i64 = power_div_q(10 + 23);
+    const M: i64 = power_div_q(10 + 24);
 
     let a = M * x as i64;
-    let div = (a + (1 << 22)) >> 23;
+    let div = (a + (1 << 23)) >> 24;
 
     (div & 0x3FF) as u16
 }
