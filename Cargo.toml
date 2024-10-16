@@ -1,8 +1,13 @@
 [package]
-name = "pqcrypto-std"
-version = "0.1.0"
-edition = "2021"
 authors = ["Jørgen Kristensen <jk@bitnor.org>"]
+description = "Standardized quantum-resistant cryptographic primitives"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+name = "pqcrypto-std"
+readme = "README.md"
+repository = "https://github.com/jrg1k/pqcrypto-std"
+rust-version = "1.79.0"
+version = "0.1.0"
 
 [dependencies]
 rand_core = { version = "0.6.4", default-features = false }
