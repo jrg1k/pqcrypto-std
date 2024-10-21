@@ -49,6 +49,7 @@ impl Poly {
         Self { f: [0; N] }
     }
 
+    /// Algorithm 9 NTT(f)
     fn ntt(&mut self) {
         let f = &mut self.f;
 
@@ -69,6 +70,7 @@ impl Poly {
         self.reduce();
     }
 
+    /// Algorithm 10 NTT^-1 (f_hat)
     fn invntt(&mut self) {
         let f = &mut self.f;
 
@@ -96,6 +98,7 @@ impl Poly {
         }
     }
 
+    /// Algorithm 7 SampleNTT(B)
     fn sample_ntt(&mut self, mut xof: impl XofReader) {
         let f = &mut self.f;
 
@@ -128,6 +131,7 @@ impl Poly {
         }
     }
 
+    /// Algorithm 8 SamplePolyCBD_2 (B)
     fn sample_poly_cbd2(&mut self, mut xof: impl XofReader) {
         let f = &mut self.f;
         let mut le_bytes = [0u8; 4];
@@ -148,6 +152,7 @@ impl Poly {
         }
     }
 
+    /// Algorithm 11 MultiplyNTTs(f_hat, g_hat)
     fn multiply_ntts_acc(&mut self, f: &Poly, g: &Poly) {
         let h = &mut self.f;
         let f = &f.f;
@@ -197,10 +202,11 @@ impl Poly {
         }
     }
 
+    #[inline]
     fn byte_decode(bytes: &[u8; Self::ENCODED_BYTES]) -> Self {
         let mut coeffs: [MaybeUninit<i16>; N] = [MaybeUninit::uninit(); N];
 
-        for (a, b) in coeffs.chunks_mut(2).zip(bytes.chunks(3)) {
+        for (a, b) in coeffs.chunks_exact_mut(2).zip(bytes.chunks_exact(3)) {
             let (t0, t1) = bytes2coeffs(b[0], b[1], b[2]);
 
             a[0].write(t0);
@@ -320,6 +326,10 @@ const fn bytes2coeffs(b0: u8, b1: u8, b2: u8) -> (i16, i16) {
     (t0 as i16, t1 as i16)
 }
 
+/// Algorithm 12 BaseCaseMultiply(a_0, a_1, b_0, b_1, zeta)
+/// Compute:
+/// - c0 = (a0*b0 + a1*b1*zeta)R^-1 (mod Q)
+/// - c1 = (a0*b1 + a1*b0)R^-1 (mod Q)
 const fn basemul(a0: i16, a1: i16, b0: i16, b1: i16, zeta: i16) -> (i16, i16) {
     let c0 = reduce::mont_mul(a0, b0) + reduce::mont_mul(reduce::mont_mul(a1, b1), zeta);
     let c1 = reduce::mont_mul(a0, b1) + reduce::mont_mul(a1, b0);
@@ -373,6 +383,7 @@ impl PolyVec {
         }
     }
 
+    #[inline]
     fn from_bytes(bytes: &[u8; K * Poly::ENCODED_BYTES]) -> Self {
         let mut vec = [const { Poly::zero() }; K];
 
@@ -489,6 +500,7 @@ struct PolyMatrix {
 }
 
 impl PolyMatrix {
+    #[inline]
     fn generate(rho: &[u8; 32]) -> Self {
         let mut m = [const { PolyVec::zero() }; K];
 
@@ -522,6 +534,7 @@ impl PolyMatrix {
 impl Mul<&PolyVec> for &PolyMatrix {
     type Output = PolyVec;
 
+    #[inline]
     fn mul(self, rhs: &PolyVec) -> Self::Output {
         let mut out = PolyVec::zero();
 
@@ -533,6 +546,7 @@ impl Mul<&PolyVec> for &PolyMatrix {
     }
 }
 
+#[inline]
 fn generate_se(sigma: &[u8; 32]) -> (PolyVec, PolyVec) {
     let mut s = PolyVec::zero();
     let mut e = PolyVec::zero();
@@ -556,12 +570,12 @@ impl PkeEncKey {
     const BYTE_SIZE: usize = PolyVec::BYTE_SIZE + 32;
     const CIPHERTEXT_SIZE: usize = PolyVec::COMPRESSED_BYTES + Poly::COMPRESSED_BYTES;
 
-    #[inline]
     fn to_bytes(&self, bytes: &mut [u8; Self::BYTE_SIZE]) {
         self.t.byte_encode(bytes);
         bytes[PolyVec::BYTE_SIZE..].copy_from_slice(&self.rho);
     }
 
+    #[inline]
     fn from_bytes(bytes: &[u8; Self::BYTE_SIZE]) -> Self {
         let (t_bytes, bytes) = bytes.split_first_chunk().unwrap();
         let (rho, _) = bytes.split_first_chunk().unwrap();
@@ -614,11 +628,11 @@ struct PkeDecKey {
 impl PkeDecKey {
     const BYTE_SIZE: usize = K * Poly::ENCODED_BYTES;
 
-    #[inline]
     fn to_bytes(&self, bytes: &mut [u8; Self::BYTE_SIZE]) {
         self.s.byte_encode(bytes);
     }
 
+    #[inline]
     fn from_bytes(bytes: &[u8; Self::BYTE_SIZE]) -> Self {
         let mut s = PolyVec::from_bytes(bytes);
         s.reduce();
@@ -645,6 +659,8 @@ impl PkeDecKey {
     }
 }
 
+/// Algorithm 13 K-PKE.KeyGen(d)
+#[inline]
 fn pke_keygen(d: &[u8; 32]) -> (PkeEncKey, PkeDecKey) {
     let (rho, sigma) = hash::g(&[d, &[K as u8]]);
 
@@ -673,11 +689,11 @@ impl EncapsKey {
     pub const BYTE_SIZE: usize = PkeEncKey::BYTE_SIZE;
     pub const CIPHERTEXT_SIZE: usize = PkeEncKey::CIPHERTEXT_SIZE;
 
-    #[inline]
     pub fn to_bytes(&self, bytes: &mut [u8; Self::BYTE_SIZE]) {
         self.ek_pke.to_bytes(bytes);
     }
 
+    #[inline]
     pub fn from_bytes(bytes: &[u8; Self::BYTE_SIZE]) -> Self {
         let ek_pke = PkeEncKey::from_bytes(bytes);
 
@@ -704,7 +720,6 @@ impl EncapsKey {
     }
 
     /// Algorithm 20 ML-KEM.Encaps(ek)
-    #[inline]
     pub fn encaps(
         &self,
         c: &mut [u8; Self::CIPHERTEXT_SIZE],
@@ -726,7 +741,6 @@ pub struct DecapsKey {
 impl DecapsKey {
     pub const BYTE_SIZE: usize = PkeDecKey::BYTE_SIZE + PkeEncKey::BYTE_SIZE + 32 + 32;
 
-    #[inline]
     pub fn to_bytes(&self, bytes: &mut [u8; Self::BYTE_SIZE], ek: &EncapsKey) {
         let (dk_bytes, bytes) = bytes.split_first_chunk_mut().unwrap();
         let (ek_bytes, bytes) = bytes.split_first_chunk_mut().unwrap();
@@ -739,6 +753,7 @@ impl DecapsKey {
         z.copy_from_slice(&self.z);
     }
 
+    #[inline]
     pub fn from_bytes(bytes: &[u8; Self::BYTE_SIZE]) -> Self {
         let (dk_bytes, bytes) = bytes.split_first_chunk().unwrap();
         let (_ek_bytes, bytes): (&[u8; PkeEncKey::BYTE_SIZE], _) =
@@ -755,7 +770,8 @@ impl DecapsKey {
         }
     }
 
-    // Algorithm 21 ML-KEM.Decaps(dk, c)
+    /// Algorithm 21 ML-KEM.Decaps(dk, c)
+    /// Algorithm 18 ML-KEM.Decaps_internal(dk, c)
     pub fn decaps(&self, k: &mut [u8; 32], ek: &EncapsKey, c: &[u8; EncapsKey::CIPHERTEXT_SIZE]) {
         let mut m_prime = [0u8; 32];
         self.dk_pke.decrypt(&mut m_prime, c);
@@ -795,6 +811,8 @@ fn cmov<const N: usize>(dst: &mut [u8; N], src: &[u8; N], cond: u32) {
     }
 }
 
+/// Algorithm 19 ML-KEM.KeyGen()
+#[inline]
 pub fn keygen(rng: &mut impl CryptoRngCore) -> (EncapsKey, DecapsKey) {
     let mut d = [0u8; 32];
     rng.fill_bytes(&mut d);
@@ -805,6 +823,7 @@ pub fn keygen(rng: &mut impl CryptoRngCore) -> (EncapsKey, DecapsKey) {
     keygen_deterministic(d, z)
 }
 
+#[inline]
 fn keygen_deterministic(d: [u8; 32], z: [u8; 32]) -> (EncapsKey, DecapsKey) {
     let (ek_pke, dk_pke) = pke_keygen(&d);
 
