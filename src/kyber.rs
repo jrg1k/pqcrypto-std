@@ -8,7 +8,7 @@ use core::{
     fmt::Display,
     hint::black_box,
     mem::{self, MaybeUninit},
-    ops::{Mul, SubAssign},
+    ops::{AddAssign, Mul, SubAssign},
 };
 use rand_core::CryptoRngCore;
 use sha3::digest::XofReader;
@@ -180,12 +180,6 @@ impl Poly {
         }
     }
 
-    fn add(&mut self, other: &Poly) {
-        for (a, b) in self.f.iter_mut().zip(other.f.iter()) {
-            *a += b;
-        }
-    }
-
     fn reduce(&mut self) {
         for a in self.f.iter_mut() {
             *a = barrett_reduce(*a);
@@ -276,6 +270,14 @@ impl Poly {
     }
 }
 
+impl AddAssign<&Poly> for Poly {
+    fn add_assign(&mut self, rhs: &Poly) {
+        for (a, b) in self.f.iter_mut().zip(rhs.f.iter()) {
+            *a += b;
+        }
+    }
+}
+
 impl SubAssign<&Poly> for Poly {
     fn sub_assign(&mut self, rhs: &Poly) {
         for (a, b) in self.f.iter_mut().zip(rhs.f.iter()) {
@@ -338,12 +340,6 @@ impl PolyVec {
     const fn zero() -> Self {
         Self {
             vec: [const { Poly::zero() }; K],
-        }
-    }
-
-    fn add(&mut self, other: &Self) {
-        for (f, g) in self.vec.iter_mut().zip(other.vec.iter()) {
-            f.add(g);
         }
     }
 
@@ -459,6 +455,14 @@ impl PolyVec {
         }
 
         pvec
+    }
+}
+
+impl AddAssign<&PolyVec> for PolyVec {
+    fn add_assign(&mut self, rhs: &PolyVec) {
+        for (f, g) in self.vec.iter_mut().zip(rhs.vec.iter()) {
+            f.add_assign(g);
+        }
     }
 }
 
@@ -583,7 +587,7 @@ impl PkeEncKey {
         // u <- NTT^-1(A^T * y) + e_1
         let mut u = &at * &y;
         u.invntt();
-        u.add(&e1);
+        u += &e1;
         u.reduce();
 
         let mu = Poly::from_msg(m);
@@ -591,8 +595,8 @@ impl PkeEncKey {
         // v <- NTT^-1(t^T * y) + e_2 + mu
         let mut v = &self.t * &y;
         v.invntt();
-        v.add(&e2);
-        v.add(&mu);
+        v += &e2;
+        v += &mu;
         v.reduce();
 
         let (c1, c2) = c.split_first_chunk_mut().unwrap();
@@ -655,7 +659,7 @@ fn pke_keygen(d: &[u8; 32]) -> (PkeEncKey, PkeDecKey) {
         t.vec[i].montgomery_form();
     }
 
-    t.add(&e);
+    t += &e;
     t.reduce();
 
     (PkeEncKey { t, rho }, PkeDecKey { s })
