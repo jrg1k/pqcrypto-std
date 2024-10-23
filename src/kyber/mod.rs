@@ -1,8 +1,7 @@
-use crate::{
-    compress::{compr_10bit, compr_1bit, compr_4bit, decompr_10bit, decompr_1bit, decompr_4bit},
-    hash,
-    reduce::{self, barrett_reduce},
-};
+mod compress;
+mod hash;
+mod reduce;
+
 use core::{
     array,
     fmt::Display,
@@ -10,6 +9,7 @@ use core::{
     mem::{self, MaybeUninit},
     ops::{AddAssign, Mul, SubAssign},
 };
+use compress::{compr_10bit, compr_1bit, compr_4bit, decompr_10bit, decompr_1bit, decompr_4bit};
 use rand_core::CryptoRngCore;
 use sha3::digest::XofReader;
 
@@ -207,7 +207,7 @@ impl Poly {
 
     fn reduce(&mut self) {
         for a in self.f.iter_mut() {
-            *a = barrett_reduce(*a);
+            *a = reduce::barrett_reduce(*a);
         }
     }
 
