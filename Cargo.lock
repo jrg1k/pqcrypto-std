@@ -83,6 +83,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hybrid-array"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "45a9a965bb102c1c891fb017c09a05c965186b1265a207640f323ddd009f9deb"
+dependencies = [
+ "typenum",
+ "zeroize",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -123,6 +133,7 @@ name = "pqcrypto-std"
 version = "0.1.1"
 dependencies = [
  "hex",
+ "hybrid-array",
  "rand",
  "rand_core",
  "serde",
@@ -281,3 +292,9 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "zeroize"
+version = "1.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ced3678a2879b30306d323f4542626697a464a97c0a07c9aebf7ebca65cd4dde"
