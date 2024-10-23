@@ -1,4 +1,7 @@
-use core::mem::MaybeUninit;
+use core::{
+    mem::MaybeUninit,
+    ops::{AddAssign, Mul},
+};
 
 use sha3::digest::XofReader;
 
@@ -55,13 +58,14 @@ impl Drop for KeyGenBuffers {
     fn drop(&mut self) {}
 }
 
-mod mldsa64 {
+mod mldsa65 {
     use core::mem::MaybeUninit;
 
-    use super::{hash, KeyGenBuffers};
+    use super::{expand_a, expand_s, hash, KeyGenBuffers, PolyMat};
 
     const K: usize = 6;
     const L: usize = 5;
+    const ETA: usize = 4;
 
     fn keygen_internal(ksi: &[u8; 32]) {
         let mut uninit_buf: MaybeUninit<KeyGenBuffers> = MaybeUninit::uninit();
@@ -71,6 +75,15 @@ mod mldsa64 {
             &mut [&mut buf.rho, &mut buf.rho_prime, &mut buf.k],
             &[ksi, &[K as u8], &[L as u8]],
         );
+
+        let a_hat: PolyMat<K, L> = expand_a(&buf.rho);
+        let (mut s1, s2) = expand_s::<K, L, ETA>(&buf.rho_prime);
+
+        s1.ntt();
+        let mut t = a_hat.multiply_ntt(&s1);
+        t.reduce_invntt_tomont();
+
+        t += &s2;
     }
 }
 
@@ -82,15 +95,10 @@ impl Poly {
     // const ENCODED_BYTES: usize = (COEFFICIENT_BITSIZE * N) / 8;
     // const COMPRESSED_BYTES: usize = (N * DV) / 8;
 
-    const fn zero() -> Self {
-        Self { f: [0; N] }
-    }
-
     /// NTT(w)
     fn ntt(&mut self) {
         let w = &mut self.f;
 
-        let mut zetas = ZETAS.iter().skip(1);
         let mut m = 1;
 
         for len in (0..8).map(|n| 128 >> n) {
@@ -106,11 +114,11 @@ impl Poly {
             }
         }
 
-        self.reduce();
+        // self.reduce();
     }
 
     /// NTT^-1 (w_hat)
-    fn invntt(&mut self) {
+    fn invntt_tomont(&mut self) {
         let w = &mut self.f;
 
         let mut m = 255;
@@ -136,16 +144,13 @@ impl Poly {
         }
     }
 
-    /// RejNTTPoly()
-    fn sample_ntt(&mut self, xof: &mut impl XofReader) {
-        let f = &mut self.f;
-
+    /// RejNTTPoly(rho)
+    fn rej_ntt(&mut self, g: &mut impl XofReader) {
+        let mut coeffs = self.f.iter_mut();
         let mut b = [0u8; 3];
 
-        let mut coeffs = f.iter_mut();
-
         loop {
-            xof.read(&mut b);
+            g.read(&mut b);
 
             let a = coeff_from_bytes(b[0], b[1], b[2]);
 
@@ -157,6 +162,56 @@ impl Poly {
                 Some(a_hat) => *a_hat = a,
                 None => break,
             }
+        }
+    }
+
+    /// RejBoundedPoly(rho)
+    fn rej_bounded<const ETA: usize>(&mut self, h: &mut impl XofReader) {
+        let mut coeffs = self.f.iter_mut();
+        let mut b = [0u8; 1];
+
+        loop {
+            h.read(&mut b);
+
+            let (z0, z1) = coeffs_from_halfbytes::<ETA>(b[0]);
+
+            if z0 != 0 {
+                if let Some(a) = coeffs.next() {
+                    *a = z0;
+                }
+            }
+
+            if z1 != 0 {
+                if let Some(a) = coeffs.next() {
+                    *a = z1;
+                }
+            }
+        }
+    }
+
+    fn multiply_ntt_acc(&mut self, a: &Self, b: &Self) {
+        for i in 0..N {
+            self.f[i] += reduce::mont_mul(a.f[i], b.f[i])
+        }
+    }
+
+    fn multiply_ntt(&mut self, a: &Self, b: &Self) {
+        for i in 0..N {
+            self.f[i] = reduce::mont_mul(a.f[i], b.f[i])
+        }
+    }
+
+    fn reduce(&mut self) {
+        for a in self.f.iter_mut() {
+            *a = reduce::barrett_reduce(*a);
+        }
+    }
+}
+
+impl AddAssign<&Poly> for Poly {
+    fn add_assign(&mut self, rhs: &Poly) {
+        for (a, b) in self.f.iter_mut().zip(rhs.f.iter()) {
+            *a += b;
         }
     }
 }
@@ -174,22 +229,151 @@ const fn coeff_from_bytes(b0: u8, b1: u8, b2: u8) -> i32 {
     0
 }
 
-type Matrix<const K: usize, const L: usize> = [[Poly; K]; L];
+const fn mod5(a: u32) -> i32 {
+    const DIV_SHIFT: usize = 10;
+    const M: u32 = ((1 << DIV_SHIFT) + 3) / 5;
+    (a - ((a * M) >> DIV_SHIFT) * 5) as i32
+}
 
+/// Convert two half-bytes into two elements of Z_Q.
+const fn coeffs_from_halfbytes<const ETA: usize>(b: u8) -> (i32, i32) {
+    let mut a0 = 0i32;
+    let mut a1 = 0i32;
+
+    let b0 = (b & 0xF) as u32;
+    let b1 = (b >> 4) as u32;
+
+    match ETA {
+        2 => {
+            if b0 < 16 {
+                a0 = 2 - mod5(b0);
+            }
+            if b1 < 16 {
+                a1 = 2 - mod5(b1);
+            }
+        }
+        4 => {
+            if b0 < 9 {
+                a0 = 4 - b0 as i32;
+            }
+            if b1 < 9 {
+                a1 = 4 - b1 as i32;
+            }
+        }
+        _ => unreachable!(),
+    }
+
+    (a0, a1)
+}
+
+struct PolyMat<const K: usize, const L: usize> {
+    m: [PolyVec<L>; K],
+}
+
+impl<const K: usize, const L: usize> PolyMat<K, L> {
+    #[inline]
+    fn multiply_ntt(self, v: &PolyVec<L>) -> PolyVec<K> {
+        let mut uninit_w_hat: MaybeUninit<PolyVec<K>> = MaybeUninit::uninit();
+        let w_hat = unsafe { uninit_w_hat.assume_init_mut() };
+
+        w_hat.multiply_ntt(&self.m[0], v);
+
+        for i in 1..K {
+            w_hat.multiply_ntt_acc(&self.m[i], v)
+        }
+
+        unsafe { uninit_w_hat.assume_init() }
+    }
+}
+
+/// ExpandA(rho)
 #[inline]
-fn generate<const K: usize, const L: usize>(rho: &[u8; 32]) -> Self {
-    let uninit_m: MaybeUninit<Matrix<K, L>> = MaybeUninit::uninit();
-    let m = unsafe { uninit_m.assume_init_mut() };
+fn expand_a<const K: usize, const L: usize>(rho: &[u8; 32]) -> PolyMat<K, L> {
+    let mut uninit_m: MaybeUninit<PolyMat<K, L>> = MaybeUninit::uninit();
+    let m = unsafe { &mut uninit_m.assume_init_mut().m };
 
-    for (i, polyvec) in m.iter_mut().enumerate() {
-        for (j, poly) in polyvec.iter_mut().enumerate() {
-            let xof = hash::xof(rho, j, i);
+    let mut g = hash::G::init();
 
-            poly.sample_ntt(xof);
+    for (r, polyvec) in m.iter_mut().enumerate() {
+        for (s, poly) in polyvec.v.iter_mut().enumerate() {
+            let mut xof = g.absorb(&[rho, &[s as u8], &[r as u8]]);
+
+            poly.rej_ntt(&mut xof);
         }
     }
 
-    uninit_m
+    unsafe { uninit_m.assume_init() }
+}
+
+struct PolyVec<const K: usize> {
+    v: [Poly; K],
+}
+
+impl<const K: usize> PolyVec<K> {
+    fn ntt(&mut self) {
+        for p in self.v.iter_mut() {
+            p.ntt();
+        }
+    }
+
+    fn multiply_ntt(&mut self, u: &Self, v: &Self) {
+        for i in 0..K {
+            self.v[i].multiply_ntt(&u.v[i], &v.v[i]);
+        }
+    }
+
+    fn multiply_ntt_acc(&mut self, u: &Self, v: &Self) {
+        for i in 0..K {
+            self.v[i].multiply_ntt_acc(&u.v[i], &v.v[i]);
+        }
+    }
+
+    fn reduce(&mut self) {
+        for p in self.v.iter_mut() {
+            p.reduce();
+        }
+    }
+
+    fn invntt_tomont(&mut self) {
+        for p in self.v.iter_mut() {
+            p.invntt_tomont();
+        }
+    }
+
+    fn reduce_invntt_tomont(&mut self) {
+        for p in self.v.iter_mut() {
+            p.reduce();
+            p.invntt_tomont();
+        }
+    }
+}
+
+impl<const K: usize> AddAssign<&PolyVec<K>> for PolyVec<K> {
+    fn add_assign(&mut self, rhs: &PolyVec<K>) {
+        for (f, g) in self.v.iter_mut().zip(rhs.v.iter()) {
+            *f += g;
+        }
+    }
+}
+
+/// ExpandS(rho)
+#[inline]
+fn expand_s<const K: usize, const L: usize, const ETA: usize>(
+    rho: &[u8; 64],
+) -> (PolyVec<L>, PolyVec<K>) {
+    let mut uninit_s1: MaybeUninit<PolyVec<L>> = MaybeUninit::uninit();
+    let mut uninit_s2: MaybeUninit<PolyVec<K>> = MaybeUninit::uninit();
+
+    let (s1, s2) = unsafe { (uninit_s1.assume_init_mut(), uninit_s2.assume_init_mut()) };
+
+    let mut h = hash::H::init();
+
+    for (nonce, poly) in s1.v.iter_mut().chain(s2.v.iter_mut()).enumerate() {
+        let mut xof = h.absorb(&[rho, &u16::to_le_bytes(nonce as u16)]);
+        poly.rej_bounded::<ETA>(&mut xof);
+    }
+
+    unsafe { (uninit_s1.assume_init(), uninit_s2.assume_init()) }
 }
 
 //     /// Algorithm 8 SamplePolyCBD_2 (B)
@@ -333,14 +517,6 @@ fn generate<const K: usize, const L: usize>(rho: &[u8; 32]) -> Self {
 //             for (i, a) in coeffs.iter().enumerate() {
 //                 *byte |= compr_1bit(*a) << i;
 //             }
-//         }
-//     }
-// }
-
-// impl AddAssign<&Poly> for Poly {
-//     fn add_assign(&mut self, rhs: &Poly) {
-//         for (a, b) in self.f.iter_mut().zip(rhs.f.iter()) {
-//             *a += b;
 //         }
 //     }
 // }
@@ -514,31 +690,6 @@ fn generate<const K: usize, const L: usize>(rho: &[u8; 32]) -> Self {
 //         }
 
 //         pvec
-//     }
-// }
-
-// impl AddAssign<&PolyVec> for PolyVec {
-//     fn add_assign(&mut self, rhs: &PolyVec) {
-//         for (f, g) in self.vec.iter_mut().zip(rhs.vec.iter()) {
-//             f.add_assign(g);
-//         }
-//     }
-// }
-
-// impl Mul<&PolyVec> for &PolyVec {
-//     type Output = Poly;
-
-//     #[inline]
-//     fn mul(self, rhs: &PolyVec) -> Self::Output {
-//         let mut out = Poly::zero();
-
-//         for (f, g) in self.vec.iter().zip(rhs.vec.iter()) {
-//             out.multiply_ntts_acc(f, g);
-//         }
-
-//         out.reduce();
-
-//         out
 //     }
 // }
 

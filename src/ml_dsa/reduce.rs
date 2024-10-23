@@ -31,12 +31,10 @@ pub const fn to_mont(a: i32) -> i32 {
 
 /// a -> a (mod Q)
 pub const fn barrett_reduce(a: i32) -> i32 {
-    const M: i64 = (1 << 46) / Q as i64;
+    // M = 2^23 / Q = 1
+    let q = (a + (1 << (22))) >> 23;
 
-    let a = a as i64;
-    let q = (a * M + (1 << 45)) >> 46;
-
-    (a - (q * Q as i64)) as i32
+    a - (q * Q)
 }
 
 #[cfg(test)]
@@ -45,7 +43,9 @@ mod tests {
     use rand::{rngs::OsRng, Rng};
     #[test]
     fn test_barret_reduce() {
-        for n in (0..10000).map(|_| -> i32 { OsRng.gen() }) {
+        for _ in 0..10000 {
+            let n: i32 = OsRng.gen();
+            let n = n % (1 << 24);
             let n_modq = n.wrapping_rem(Q);
             let n_breduced = barrett_reduce(n);
             assert!(n_breduced < (Q) && n_breduced > -(Q));
