@@ -17,3 +17,16 @@ Only supports Kyber768.
 - [x] Compression
 - [x] Encaps/Decaps
 - [ ] Multiple parameter sets
+
+## ML-DSA (Dilithium)
+
+Implementation of [FIPS 204](https://csrc.nist.gov/pubs/fips/204/final).
+
+### Status
+
+- [x] Key generation
+- [ ] Key encoding
+- [ ] Key decoding
+- [ ] Signing
+- [ ] Verification
+- [x] Multiple parameter sets
