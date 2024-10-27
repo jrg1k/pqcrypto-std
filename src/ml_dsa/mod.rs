@@ -98,16 +98,6 @@ pub mod mldsa87 {
     pub type VerifyingKey = super::VerifyingKey<K>;
 }
 
-pub struct VerifyingKey<const K: usize> {
-    rho: [u8; 32],
-    t1: PolyVec<K>,
-}
-
-impl<const K: usize> Drop for VerifyingKey<K> {
-    fn drop(&mut self) {
-        self.rho.zeroize();
-    }
-}
 
 fn vk_encode<const K: usize, const PK_SIZE: usize>(
     dst: &mut [u8; PK_SIZE],
@@ -136,6 +126,11 @@ impl<const K: usize, const L: usize> Drop for KeyGenTmp<K, L> {
     }
 }
 
+pub struct VerifyingKey<const K: usize> {
+    rho: [u8; 32],
+    t1: PolyVec<K>,
+}
+
 pub struct SigningKey<const K: usize, const L: usize, const ETA: usize> {
     rho: [u8; 32],
     k: [u8; 32],
@@ -148,7 +143,6 @@ pub struct SigningKey<const K: usize, const L: usize, const ETA: usize> {
 
 impl<const K: usize, const L: usize, const ETA: usize> Drop for SigningKey<K, L, ETA> {
     fn drop(&mut self) {
-        self.rho.zeroize();
         self.k.zeroize();
         self.tr.zeroize();
     }
