@@ -25,8 +25,8 @@ Implementation of [FIPS 204](https://csrc.nist.gov/pubs/fips/204/final).
 ### Status
 
 - [x] Key generation
-- [ ] Key encoding
-- [ ] Key decoding
+- [x] Key encoding
+- [x] Key decoding
 - [ ] Signing
 - [ ] Verification
 - [x] Multiple parameter sets

@@ -98,12 +98,7 @@ pub mod mldsa87 {
     pub type VerifyingKey = super::VerifyingKey<K>;
 }
 
-
-fn vk_encode<const K: usize, const PK_SIZE: usize>(
-    dst: &mut [u8; PK_SIZE],
-    rho: &[u8; 32],
-    t1: &PolyVec<K>,
-) {
+fn vk_encode<const K: usize>(dst: &mut [u8], rho: &[u8; 32], t1: &PolyVec<K>) {
     dst[..32].copy_from_slice(rho);
     for (xi, z) in
         t1.v.iter()
@@ -129,6 +124,35 @@ impl<const K: usize, const L: usize> Drop for KeyGenTmp<K, L> {
 pub struct VerifyingKey<const K: usize> {
     rho: [u8; 32],
     t1: PolyVec<K>,
+}
+
+impl<const K: usize> VerifyingKey<K> {
+    const fn uninit() -> MaybeUninit<Self> {
+        MaybeUninit::uninit()
+    }
+
+    pub fn encode(&self, dst: &mut [u8]) {
+        vk_encode(dst, &self.rho, &self.t1)
+    }
+
+    #[inline]
+    pub fn decode(src: &[u8]) -> Self {
+        let mut uninit_vk = Self::uninit();
+        let vk = unsafe { uninit_vk.assume_init_mut() };
+
+        vk.rho.copy_from_slice(&src[..32]);
+
+        for (xi, z) in vk
+            .t1
+            .v
+            .iter_mut()
+            .zip(src[32..].chunks_exact(Poly::PACKED_10BIT))
+        {
+            xi.unpack_simple_10bit(z.try_into().unwrap())
+        }
+
+        unsafe { uninit_vk.assume_init() }
+    }
 }
 
 pub struct SigningKey<const K: usize, const L: usize, const ETA: usize> {
@@ -217,7 +241,7 @@ impl<const K: usize, const L: usize, const ETA: usize> SigningKey<K, L, ETA> {
                 self.s2.pack_eta2(&mut buf[..K * Poly::PACKED_3BIT]);
 
                 let buf = &mut buf[K * Poly::PACKED_3BIT..];
-                self.t0.pack_2pow12(buf)
+                self.t0.pack_eta_2powdm1(buf)
             }
             4 => {
                 self.s1.pack_eta4(&mut buf[..L * Poly::PACKED_4BIT]);
@@ -226,14 +250,51 @@ impl<const K: usize, const L: usize, const ETA: usize> SigningKey<K, L, ETA> {
                 self.s2.pack_eta4(buf);
 
                 let buf = &mut buf[K * Poly::PACKED_4BIT..];
-                self.t0.pack_2pow12(buf)
+                self.t0.pack_eta_2powdm1(buf)
             }
             _ => unreachable!(),
         }
     }
+
+    #[inline]
+    pub fn decode(src: &[u8]) -> Self {
+        let mut uninit_sk = Self::uninit();
+        let sk = unsafe { uninit_sk.assume_init_mut() };
+
+        sk.rho.copy_from_slice(&src[..32]);
+        sk.k.copy_from_slice(&src[32..64]);
+        sk.tr.copy_from_slice(&src[64..128]);
+
+        match ETA {
+            2 => {
+                let z = &src[128..];
+                sk.s1.unpack_eta2(&z[..L * Poly::PACKED_3BIT]);
+
+                let z = &z[L * Poly::PACKED_3BIT..];
+                sk.s2.unpack_eta2(&z[..K * Poly::PACKED_3BIT]);
+
+                let z = &z[K * Poly::PACKED_3BIT..];
+                sk.t0.unpack_eta_2powdm1(z)
+            }
+            4 => {
+                let z = &src[128..];
+                sk.s1.unpack_eta4(&z[..L * Poly::PACKED_4BIT]);
+
+                let z = &z[L * Poly::PACKED_4BIT..];
+                sk.s2.unpack_eta4(&z[..K * Poly::PACKED_4BIT]);
+
+                let z = &z[K * Poly::PACKED_4BIT..];
+                sk.t0.unpack_eta_2powdm1(z)
+            }
+            _ => unreachable!(),
+        }
+
+        sk.a_hat.expand_a(&sk.rho);
+
+        unsafe { uninit_sk.assume_init() }
+    }
 }
 
-#[derive(Debug)]
 struct Poly {
     f: [i32; N],
 }
@@ -408,6 +469,16 @@ impl Poly {
         }
     }
 
+    fn unpack_simple_10bit(&mut self, z: &[u8; Self::PACKED_10BIT]) {
+        for (a, b) in self.f.chunks_exact_mut(4).zip(z.chunks_exact(5)) {
+            let b: [i32; 5] = array::from_fn(|i| b[i] as i32);
+            a[0] = (b[0] | (b[1] << 8)) & 0x3FF;
+            a[1] = ((b[1] >> 2) | (b[2] << 6)) & 0x3FF;
+            a[2] = ((b[2] >> 4) | (b[3] << 4)) & 0x3FF;
+            a[3] = ((b[3] >> 6) | (b[4] << 2)) & 0x3FF;
+        }
+    }
+
     const PACKED_4BIT: usize = (N * 4) / 8;
 
     fn pack_eta4(&self, z: &mut [u8; Self::PACKED_4BIT]) {
@@ -415,6 +486,13 @@ impl Poly {
             let t0 = (4 - a[0]) as u8;
             let t1 = (4 - a[1]) as u8;
             *b = t0 | (t1 << 4);
+        }
+    }
+
+    fn unpack_eta4(&mut self, z: &[u8; Self::PACKED_4BIT]) {
+        for (a, b) in self.f.chunks_exact_mut(2).zip(z) {
+            a[0] = 4 - (b & 0xF) as i32;
+            a[1] = 4 - (b >> 4) as i32;
         }
     }
 
@@ -430,25 +508,57 @@ impl Poly {
         }
     }
 
+    fn unpack_eta2(&mut self, z: &[u8; Self::PACKED_3BIT]) {
+        for (a, b) in self.f.chunks_exact_mut(8).zip(z.chunks_exact(3)) {
+            a[0] = 2 - (b[0] & 7) as i32;
+            a[1] = 2 - ((b[0] >> 3) & 7) as i32;
+            a[2] = 2 - ((b[0] >> 6) | (b[1] << 2) & 7) as i32;
+            a[3] = 2 - ((b[1] >> 1) & 7) as i32;
+            a[4] = 2 - ((b[1] >> 4) & 7) as i32;
+            a[5] = 2 - (((b[1] >> 7) | (b[2] << 1)) & 7) as i32;
+            a[6] = 2 - ((b[2] >> 2) & 7) as i32;
+            a[7] = 2 - (b[2] >> 5) as i32
+        }
+    }
+
     const PACKED_13BIT: usize = (N * 13) / 8;
 
-    fn pack_2pow12(&self, z: &mut [u8; Self::PACKED_13BIT]) {
-        for (b, a) in z.chunks_exact_mut(13).zip(self.f.chunks_exact(8)) {
-            let t: [u16; 8] = array::from_fn(|i| ((1 << (D - 1)) - a[i]) as u16);
+    fn pack_eta_2powdm1(&self, z: &mut [u8; Self::PACKED_13BIT]) {
+        const ETA: i32 = 1 << (D - 1);
 
-            b[0] = t[0] as u8;
-            b[1] = ((t[0] >> 8) | t[1] << 5) as u8;
-            b[2] = (t[1] >> 3) as u8;
-            b[3] = ((t[1] >> 11) | t[2] << 2) as u8;
-            b[4] = ((t[2] >> 6) | (t[3] << 7)) as u8;
-            b[5] = (t[3] >> 1) as u8;
-            b[6] = ((t[3] >> 9) | t[4] << 4) as u8;
-            b[7] = (t[4] >> 4) as u8;
-            b[8] = ((t[4] >> 12) | t[5] << 1) as u8;
-            b[9] = ((t[5] >> 7) | t[6] << 6) as u8;
-            b[10] = (t[6] >> 2) as u8;
-            b[11] = ((t[6] >> 10) | t[7] << 3) as u8;
-            b[12] = (t[7] >> 5) as u8;
+        for (b, a) in z.chunks_exact_mut(13).zip(self.f.chunks_exact(8)) {
+            let a: [u16; 8] = array::from_fn(|i| (ETA - a[i]) as u16);
+
+            b[0] = a[0] as u8;
+            b[1] = ((a[0] >> 8) | a[1] << 5) as u8;
+            b[2] = (a[1] >> 3) as u8;
+            b[3] = ((a[1] >> 11) | a[2] << 2) as u8;
+            b[4] = ((a[2] >> 6) | (a[3] << 7)) as u8;
+            b[5] = (a[3] >> 1) as u8;
+            b[6] = ((a[3] >> 9) | a[4] << 4) as u8;
+            b[7] = (a[4] >> 4) as u8;
+            b[8] = ((a[4] >> 12) | a[5] << 1) as u8;
+            b[9] = ((a[5] >> 7) | a[6] << 6) as u8;
+            b[10] = (a[6] >> 2) as u8;
+            b[11] = ((a[6] >> 10) | a[7] << 3) as u8;
+            b[12] = (a[7] >> 5) as u8;
+        }
+    }
+
+    fn unpack_eta_2powdm1(&mut self, z: &[u8; Self::PACKED_13BIT]) {
+        const ETA: i32 = 1 << (D - 1);
+
+        for (a, b) in self.f.chunks_exact_mut(8).zip(z.chunks_exact(13)) {
+            let b: [i32; 13] = array::from_fn(|i| b[i] as i32);
+
+            a[0] = ETA - ((b[0] | (b[1] << 8)) & 0x1FFF);
+            a[1] = ETA - (((b[1] >> 5) | (b[2] << 3) | (b[3] << 11)) & 0x1FFF);
+            a[2] = ETA - (((b[3] >> 2) | (b[4] << 6)) & 0x1FFF);
+            a[3] = ETA - (((b[4] >> 7) | (b[5] << 1) | (b[6] << 9)) & 0x1FFF);
+            a[4] = ETA - (((b[6] >> 4) | (b[7] << 4) | (b[8] << 12)) & 0x1FFF);
+            a[5] = ETA - (((b[8] >> 1) | (b[9] << 7)) & 0x1FFF);
+            a[6] = ETA - (((b[9] >> 6) | (b[10] << 2) | (b[11] << 10)) & 0x1FFF);
+            a[7] = ETA - (((b[11] >> 3) | (b[12] << 5)) & 0x1FFF);
         }
     }
 }
@@ -511,7 +621,6 @@ const fn coeffs_from_halfbytes<const ETA: usize>(b: u8) -> (Option<i32>, Option<
     }
 }
 
-#[derive(Debug)]
 struct PolyMat<const K: usize, const L: usize> {
     m: [PolyVec<L>; K],
 }
@@ -531,7 +640,6 @@ impl<const K: usize, const L: usize> PolyMat<K, L> {
     }
 }
 
-#[derive(Debug)]
 struct PolyVec<const K: usize> {
     v: [Poly; K],
 }
@@ -558,7 +666,7 @@ impl<const K: usize> PolyVec<K> {
 
     fn power2round(&self, t1: &mut PolyVec<K>, t0: &mut PolyVec<K>) {
         for i in 0..K {
-            self.v[i].power2round(&mut t1.v[i], &mut t0.v[i])
+            self.v[i].power2round(&mut t1.v[i], &mut t0.v[i]);
         }
     }
 
@@ -568,15 +676,33 @@ impl<const K: usize> PolyVec<K> {
         }
     }
 
+    fn unpack_eta4(&mut self, z: &[u8]) {
+        for (p, buf) in self.v.iter_mut().zip(z.chunks_exact(Poly::PACKED_4BIT)) {
+            p.unpack_eta4(buf.try_into().unwrap());
+        }
+    }
+
     fn pack_eta2(&self, z: &mut [u8]) {
         for (buf, p) in z.chunks_exact_mut(Poly::PACKED_3BIT).zip(self.v.iter()) {
             p.pack_eta2(buf.try_into().unwrap());
         }
     }
 
-    fn pack_2pow12(&self, z: &mut [u8]) {
+    fn unpack_eta2(&mut self, z: &[u8]) {
+        for (p, buf) in self.v.iter_mut().zip(z.chunks_exact(Poly::PACKED_3BIT)) {
+            p.unpack_eta2(buf.try_into().unwrap());
+        }
+    }
+
+    fn pack_eta_2powdm1(&self, z: &mut [u8]) {
         for (buf, p) in z.chunks_exact_mut(Poly::PACKED_13BIT).zip(self.v.iter()) {
-            p.pack_2pow12(buf.try_into().unwrap());
+            p.pack_eta_2powdm1(buf.try_into().unwrap());
+        }
+    }
+
+    fn unpack_eta_2powdm1(&mut self, z: &[u8]) {
+        for (p, buf) in self.v.iter_mut().zip(z.chunks_exact(Poly::PACKED_13BIT)) {
+            p.unpack_eta_2powdm1(buf.try_into().unwrap());
         }
     }
 
@@ -638,6 +764,14 @@ mod tests {
 
                         assert_eq!(vk_bytes, test.pk[..]);
                         assert_eq!(sk_bytes, test.sk[..]);
+
+                        let sk_prime = mldsa44::SigningKey::decode(&test.sk);
+                        sk_prime.encode(&mut sk_bytes);
+                        assert_eq!(sk_bytes, test.sk[..]);
+
+                        let vk_prime = mldsa44::VerifyingKey::decode(&test.pk);
+                        vk_prime.encode(&mut vk_bytes);
+                        assert_eq!(vk_bytes, test.pk[..]);
                     }
                 }
                 "ML-DSA-65" => {
@@ -651,6 +785,14 @@ mod tests {
 
                         assert_eq!(vk_bytes, test.pk[..]);
                         assert_eq!(sk_bytes, test.sk[..]);
+
+                        let sk_prime = mldsa65::SigningKey::decode(&test.sk);
+                        sk_prime.encode(&mut sk_bytes);
+                        assert_eq!(sk_bytes, test.sk[..]);
+
+                        let vk_prime = mldsa65::VerifyingKey::decode(&test.pk);
+                        vk_prime.encode(&mut vk_bytes);
+                        assert_eq!(vk_bytes, test.pk[..]);
                     }
                 }
                 "ML-DSA-87" => {
@@ -664,6 +806,14 @@ mod tests {
 
                         assert_eq!(vk_bytes, test.pk[..]);
                         assert_eq!(sk_bytes, test.sk[..]);
+
+                        let sk_prime = mldsa87::SigningKey::decode(&test.sk);
+                        sk_prime.encode(&mut sk_bytes);
+                        assert_eq!(sk_bytes, test.sk[..]);
+
+                        let vk_prime = mldsa87::VerifyingKey::decode(&test.pk);
+                        vk_prime.encode(&mut vk_bytes);
+                        assert_eq!(vk_bytes, test.pk[..]);
                     }
                 }
                 _ => panic!("invalid paramter set"),
