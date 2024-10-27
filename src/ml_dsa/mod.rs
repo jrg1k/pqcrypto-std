@@ -112,7 +112,6 @@ struct KeyGenTmp<const K: usize, const L: usize> {
     rho_prime: [u8; 64],
     t: PolyVec<K>,
     t1: PolyVec<K>,
-    s1_hat: PolyVec<L>,
 }
 
 impl<const K: usize, const L: usize> Drop for KeyGenTmp<K, L> {
@@ -159,9 +158,9 @@ pub struct SigningKey<const K: usize, const L: usize, const ETA: usize> {
     rho: [u8; 32],
     k: [u8; 32],
     tr: [u8; 64],
-    s1: PolyVec<L>,
-    s2: PolyVec<K>,
-    t0: PolyVec<K>,
+    s1_hat: PolyVec<L>,
+    s2_hat: PolyVec<K>,
+    t0_hat: PolyVec<K>,
     a_hat: PolyMat<K, L>,
 }
 
@@ -210,23 +209,44 @@ impl<const K: usize, const L: usize, const ETA: usize> SigningKey<K, L, ETA> {
         xof.read(&mut self.k);
 
         self.a_hat.expand_a(&self.rho);
-        expand_s::<K, L, ETA>(&mut self.s1, &mut self.s2, &tmp.rho_prime);
+        expand_s::<K, L, ETA>(&mut self.s1_hat, &mut self.s2_hat, &tmp.rho_prime);
 
-        tmp.s1_hat.ntt(&self.s1);
-        tmp.t.multiply_matvec_ntt(&self.a_hat, &tmp.s1_hat);
+        self.s1_hat.ntt_inplace();
+
+        tmp.t.multiply_matvec_ntt(&self.a_hat, &self.s1_hat);
         tmp.t.reduce_invntt_tomont();
 
-        tmp.t += &self.s2;
+        tmp.t += &self.s2_hat;
 
-        tmp.t.power2round(&mut tmp.t1, &mut self.t0);
+        tmp.t.power2round(&mut tmp.t1, &mut self.t0_hat);
 
         vk_encode(vk, &self.rho, &tmp.t1);
 
         let mut xof = h.absorb(&[vk]);
         xof.read(&mut self.tr);
+
+        self.s2_hat.ntt_inplace();
+        self.t0_hat.ntt_inplace();
     }
 
     pub fn encode(&self, dst: &mut [u8]) {
+        struct Tmp<const K: usize, const L: usize> {
+            s1: PolyVec<L>,
+            s2: PolyVec<K>,
+            t0: PolyVec<K>,
+        }
+
+        impl<const L: usize, const K: usize> Drop for Tmp<L, K> {
+            fn drop(&mut self) {}
+        }
+
+        let mut uninit_tmp: MaybeUninit<Tmp<K, L>> = MaybeUninit::uninit();
+        let tmp = unsafe { uninit_tmp.assume_init_mut() };
+
+        tmp.s1.invntt(&self.s1_hat);
+        tmp.s2.invntt(&self.s2_hat);
+        tmp.t0.invntt(&self.t0_hat);
+
         dst[..32].copy_from_slice(&self.rho);
         dst[32..64].copy_from_slice(&self.k);
         dst[64..128].copy_from_slice(&self.tr);
@@ -235,22 +255,22 @@ impl<const K: usize, const L: usize, const ETA: usize> SigningKey<K, L, ETA> {
 
         match ETA {
             2 => {
-                self.s1.pack_eta2(&mut buf[..L * Poly::PACKED_3BIT]);
+                tmp.s1.pack_eta2(&mut buf[..L * Poly::PACKED_3BIT]);
 
                 let buf = &mut buf[L * Poly::PACKED_3BIT..];
-                self.s2.pack_eta2(&mut buf[..K * Poly::PACKED_3BIT]);
+                tmp.s2.pack_eta2(&mut buf[..K * Poly::PACKED_3BIT]);
 
                 let buf = &mut buf[K * Poly::PACKED_3BIT..];
-                self.t0.pack_eta_2powdm1(buf)
+                tmp.t0.pack_eta_2powdm1(buf)
             }
             4 => {
-                self.s1.pack_eta4(&mut buf[..L * Poly::PACKED_4BIT]);
+                tmp.s1.pack_eta4(&mut buf[..L * Poly::PACKED_4BIT]);
 
                 let buf = &mut buf[L * Poly::PACKED_4BIT..];
-                self.s2.pack_eta4(buf);
+                tmp.s2.pack_eta4(buf);
 
                 let buf = &mut buf[K * Poly::PACKED_4BIT..];
-                self.t0.pack_eta_2powdm1(buf)
+                tmp.t0.pack_eta_2powdm1(buf)
             }
             _ => unreachable!(),
         }
@@ -268,28 +288,32 @@ impl<const K: usize, const L: usize, const ETA: usize> SigningKey<K, L, ETA> {
         match ETA {
             2 => {
                 let z = &src[128..];
-                sk.s1.unpack_eta2(&z[..L * Poly::PACKED_3BIT]);
+                sk.s1_hat.unpack_eta2(&z[..L * Poly::PACKED_3BIT]);
 
                 let z = &z[L * Poly::PACKED_3BIT..];
-                sk.s2.unpack_eta2(&z[..K * Poly::PACKED_3BIT]);
+                sk.s2_hat.unpack_eta2(&z[..K * Poly::PACKED_3BIT]);
 
                 let z = &z[K * Poly::PACKED_3BIT..];
-                sk.t0.unpack_eta_2powdm1(z)
+                sk.t0_hat.unpack_eta_2powdm1(z)
             }
             4 => {
                 let z = &src[128..];
-                sk.s1.unpack_eta4(&z[..L * Poly::PACKED_4BIT]);
+                sk.s1_hat.unpack_eta4(&z[..L * Poly::PACKED_4BIT]);
 
                 let z = &z[L * Poly::PACKED_4BIT..];
-                sk.s2.unpack_eta4(&z[..K * Poly::PACKED_4BIT]);
+                sk.s2_hat.unpack_eta4(&z[..K * Poly::PACKED_4BIT]);
 
                 let z = &z[K * Poly::PACKED_4BIT..];
-                sk.t0.unpack_eta_2powdm1(z)
+                sk.t0_hat.unpack_eta_2powdm1(z)
             }
             _ => unreachable!(),
         }
 
         sk.a_hat.expand_a(&sk.rho);
+
+        sk.s1_hat.ntt_inplace();
+        sk.s2_hat.ntt_inplace();
+        sk.t0_hat.ntt_inplace();
 
         unsafe { uninit_sk.assume_init() }
     }
@@ -350,7 +374,63 @@ impl Poly {
     }
 
     /// NTT^-1 (w_hat)
-    fn invntt_tomont(&mut self) {
+    fn invntt(&mut self, w: &Self) {
+        let w_hat = &mut self.f;
+
+        w_hat.copy_from_slice(&w.f);
+
+        let mut m = 255;
+
+        for len in (0..8).map(|n| 1 << n) {
+            for start in (0..256).step_by(len << 1) {
+                let zeta = -ZETAS[m];
+                m -= 1;
+                for j in start..start + len {
+                    let t = w_hat[j];
+                    w_hat[j] = t + w_hat[j + len];
+                    w_hat[j + len] = t - w_hat[j + len];
+                    w_hat[j + len] = reduce::mont_mul(zeta, w_hat[j + len]);
+                }
+            }
+        }
+
+        // 2^32 / 256 = 2^{24}
+        const DIV_256: i32 = ((1 << 24) % Q as i64) as i32;
+
+        for a in w_hat.iter_mut() {
+            *a = reduce::mont_mul(*a, DIV_256);
+        }
+    }
+
+    /// NTT^-1 (w_hat)
+    fn invntt_inplace(&mut self) {
+        let w = &mut self.f;
+
+        let mut m = 255;
+
+        for len in (0..8).map(|n| 1 << n) {
+            for start in (0..256).step_by(len << 1) {
+                let zeta = -ZETAS[m];
+                m -= 1;
+                for j in start..start + len {
+                    let t = w[j];
+                    w[j] = t + w[j + len];
+                    w[j + len] = t - w[j + len];
+                    w[j + len] = reduce::mont_mul(zeta, w[j + len]);
+                }
+            }
+        }
+
+        // 2^32 / 256 = 2^{24}
+        const DIV_256: i32 = ((1 << 24) % Q as i64) as i32;
+
+        for a in w.iter_mut() {
+            *a = reduce::mont_mul(*a, DIV_256);
+        }
+    }
+
+    /// NTT^-1 (w_hat)
+    fn invntt_tomont_inplace(&mut self) {
         let w = &mut self.f;
 
         let mut m = 255;
@@ -657,10 +737,22 @@ impl<const K: usize> PolyVec<K> {
         }
     }
 
+    fn invntt(&mut self, v: &Self) {
+        for (p, v) in self.v.iter_mut().zip(&v.v) {
+            p.invntt(v);
+        }
+    }
+
+    fn invntt_inplace(&mut self) {
+        for p in self.v.iter_mut() {
+            p.invntt_inplace();
+        }
+    }
+
     fn reduce_invntt_tomont(&mut self) {
         for p in self.v.iter_mut() {
             p.reduce();
-            p.invntt_tomont();
+            p.invntt_tomont_inplace();
         }
     }
 
