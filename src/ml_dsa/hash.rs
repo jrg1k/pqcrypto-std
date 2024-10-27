@@ -16,7 +16,7 @@ impl H {
     }
 
     #[inline]
-    pub fn absorb(&mut self, src: &[&[u8]]) -> impl XofReader {
+    pub fn absorb<const N: usize>(&mut self, src: &[&[u8]; N]) -> impl XofReader {
         for s in src {
             self.h.update(s);
         }
@@ -38,7 +38,7 @@ impl G {
     }
 
     #[inline]
-    pub fn absorb(&mut self, src: &[&[u8]]) -> impl XofReader {
+    pub fn absorb<const N: usize>(&mut self, src: &[&[u8]; N]) -> impl XofReader {
         for s in src {
             self.h.update(s);
         }
