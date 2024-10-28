@@ -15,6 +15,17 @@ impl H {
         }
     }
 
+    pub fn absorb_and_squeeze<const N: usize, const M: usize>(
+        &mut self,
+        dst: &mut [u8; N],
+        src: &[&[u8]; M],
+    ) {
+        for s in src {
+            self.h.update(s);
+        }
+        self.h.finalize_xof_reset_into(dst);
+    }
+
     #[inline]
     pub fn absorb<const N: usize>(&mut self, src: &[&[u8]; N]) -> impl XofReader {
         for s in src {

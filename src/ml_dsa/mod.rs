@@ -62,11 +62,12 @@ pub mod mldsa44 {
     const K: usize = 4;
     const L: usize = 4;
     const ETA: usize = 2;
+    const GAMMA1: usize = 17;
 
     pub const VK_SIZE: usize = vk_size(K);
     pub const SK_SIZE: usize = sk_size(K, L, ETA);
 
-    pub type SigningKey = super::SigningKey<K, L, ETA>;
+    pub type SigningKey = super::SigningKey<K, L, ETA, GAMMA1>;
     pub type VerifyingKey = super::VerifyingKey<K>;
 }
 
@@ -76,11 +77,12 @@ pub mod mldsa65 {
     const K: usize = 6;
     const L: usize = 5;
     const ETA: usize = 4;
+    const GAMMA1: usize = 19;
 
     pub const VK_SIZE: usize = vk_size(K);
     pub const SK_SIZE: usize = sk_size(K, L, ETA);
 
-    pub type SigningKey = super::SigningKey<K, L, ETA>;
+    pub type SigningKey = super::SigningKey<K, L, ETA, GAMMA1>;
     pub type VerifyingKey = super::VerifyingKey<K>;
 }
 
@@ -90,11 +92,12 @@ pub mod mldsa87 {
     const K: usize = 8;
     const L: usize = 7;
     const ETA: usize = 2;
+    const GAMMA1: usize = 19;
 
     pub const VK_SIZE: usize = vk_size(K);
     pub const SK_SIZE: usize = sk_size(K, L, ETA);
 
-    pub type SigningKey = super::SigningKey<K, L, ETA>;
+    pub type SigningKey = super::SigningKey<K, L, ETA, GAMMA1>;
     pub type VerifyingKey = super::VerifyingKey<K>;
 }
 
@@ -154,7 +157,7 @@ impl<const K: usize> VerifyingKey<K> {
     }
 }
 
-pub struct SigningKey<const K: usize, const L: usize, const ETA: usize> {
+pub struct SigningKey<const K: usize, const L: usize, const ETA: usize, const GAMMA1: usize> {
     rho: [u8; 32],
     k: [u8; 32],
     tr: [u8; 64],
@@ -164,14 +167,18 @@ pub struct SigningKey<const K: usize, const L: usize, const ETA: usize> {
     a_hat: PolyMat<K, L>,
 }
 
-impl<const K: usize, const L: usize, const ETA: usize> Drop for SigningKey<K, L, ETA> {
+impl<const K: usize, const L: usize, const ETA: usize, const GAMMA1: usize> Drop
+    for SigningKey<K, L, ETA, GAMMA1>
+{
     fn drop(&mut self) {
         self.k.zeroize();
         self.tr.zeroize();
     }
 }
 
-impl<const K: usize, const L: usize, const ETA: usize> SigningKey<K, L, ETA> {
+impl<const K: usize, const L: usize, const ETA: usize, const GAMMA1: usize>
+    SigningKey<K, L, ETA, GAMMA1>
+{
     const fn uninit() -> MaybeUninit<Self> {
         MaybeUninit::uninit()
     }
@@ -316,6 +323,52 @@ impl<const K: usize, const L: usize, const ETA: usize> SigningKey<K, L, ETA> {
         sk.t0_hat.ntt_inplace();
 
         unsafe { uninit_sk.assume_init() }
+    }
+
+    fn sign(&self, dst: &mut [u8], m: &[u8], rnd: &[u8; 32]) {
+        struct Tmp<const K: usize, const L: usize> {
+            mu: [u8; 64],
+            rho_prime2: [u8; 64],
+            y: PolyVec<L>,
+            y_hat: PolyVec<L>,
+            w: PolyVec<K>,
+        }
+
+        impl<const L: usize, const K: usize> Drop for Tmp<L, K> {
+            fn drop(&mut self) {
+                self.rho_prime2.zeroize();
+            }
+        }
+
+        let mut uninit_tmp: MaybeUninit<Tmp<K, L>> = MaybeUninit::uninit();
+        let tmp = unsafe { uninit_tmp.assume_init_mut() };
+
+        let mut h = hash::H::init();
+
+        let mut xof = h.absorb(&[&self.tr, m]);
+        xof.read(&mut tmp.mu);
+
+        let mut xof = h.absorb(&[&self.k, rnd, &tmp.mu]);
+        xof.read(&mut tmp.rho_prime2);
+
+        let mut kappa = 0;
+
+        loop {
+            match GAMMA1 {
+                17 => tmp
+                    .y
+                    .expand_mask_gamma2pow17(&tmp.rho_prime2, kappa, &mut h),
+                19 => tmp
+                    .y
+                    .expand_mask_gamma2pow19(&tmp.rho_prime2, kappa, &mut h),
+                _ => unreachable!(),
+            }
+
+            tmp.y_hat.ntt(&tmp.y);
+
+            tmp.w.multiply_matvec_ntt(&self.a_hat, &tmp.y_hat);
+            tmp.w.reduce_invntt_tomont();
+        }
     }
 }
 
@@ -537,6 +590,14 @@ impl Poly {
         }
     }
 
+    fn decompose(&self, f: &mut Self, g: &mut Self) {
+        for i in 0..N {
+            let (r1, r0) = power2round(self.f[i]);
+            f.f[i] = r1;
+            g.f[i] = r0;
+        }
+    }
+
     const PACKED_10BIT: usize = (N * 10) / 8;
 
     fn pack_simple_10bit(&self, z: &mut [u8; Self::PACKED_10BIT]) {
@@ -641,12 +702,116 @@ impl Poly {
             a[7] = ETA - (((b[11] >> 3) | (b[12] << 5)) & 0x1FFF);
         }
     }
+
+    fn unpack_gamma_2pow17(&mut self, z: &[u8; Self::packed_bytesize(18)]) {
+        const B: i32 = 1 << 17;
+        const BITMASK: i32 = 0x3ffff;
+
+        for (a, b) in self.f.chunks_exact_mut(4).zip(z.chunks_exact(9)) {
+            let b: [i32; 9] = array::from_fn(|i| b[i] as i32);
+
+            a[0] = B - (((b[0] >> 0) | (b[1] << 8) | (b[2] << 16)) & BITMASK);
+            a[1] = B - (((b[2] >> 2) | (b[3] << 6) | (b[4] << 14)) & BITMASK);
+            a[2] = B - (((b[4] >> 4) | (b[5] << 4) | (b[6] << 12)) & BITMASK);
+            a[3] = B - (((b[6] >> 6) | (b[7] << 2) | (b[8] << 10)) & BITMASK);
+        }
+    }
+
+    fn unpack_gamma_2pow19(&mut self, z: &[u8; Self::packed_bytesize(20)]) {
+        const B: i32 = 1 << 19;
+        const BITMASK: i32 = 0xfffff;
+
+        for (a, b) in self.f.chunks_exact_mut(2).zip(z.chunks_exact(5)) {
+            let b: [i32; 5] = array::from_fn(|i| b[i] as i32);
+
+            a[0] = B - (((b[0] >> 0) | (b[1] << 8) | (b[2] << 16)) & BITMASK);
+            a[1] = B - ((b[2] >> 4) | (b[3] << 4) | (b[4] << 12));
+        }
+    }
+
+    const fn packed_bytesize(bitlen: usize) -> usize {
+        (N * bitlen) / 8
+    }
 }
 
 impl AddAssign<&Poly> for Poly {
     fn add_assign(&mut self, rhs: &Poly) {
         for (a, b) in self.f.iter_mut().zip(rhs.f.iter()) {
             *a += b;
+        }
+    }
+}
+
+const fn decompose_88(mut r: i32) -> (i32, i32) {
+    const GAMMA2: i32 = (Q - 1) / 88;
+    const M: i32 = ((1 << 30) / (GAMMA2 as i64)) as i32;
+    const R1_MAX: i32 = (Q - 1) / (2 * GAMMA2);
+
+    r += (r >> 31) & Q;
+
+    let mut r1 = (r + 255) >> 8;
+    r1 = (r1 * M + (1 << 22)) >> 23;
+    r1 ^= ((R1_MAX - 1 - r1) >> 31) & r1;
+
+    let mut r0 = r - r1 * 2 * GAMMA2;
+    r0 -= (((Q - 1) / 2 - r0) >> 31) & Q;
+
+    (r1, r0)
+}
+
+const fn decompose_32(mut r: i32) -> (i32, i32) {
+    const GAMMA2: i32 = (Q - 1) / 32;
+    const M: i32 = ((1 << 28) / (GAMMA2 as i64)) as i32;
+    const R1_MAX: i32 = (Q - 1) / (2 * GAMMA2);
+
+    r += (r >> 31) & Q;
+
+    let mut r1 = (r + 255) >> 8;
+    r1 = (r1 * M + (1 << 20)) >> 21;
+    r1 &= R1_MAX - 1;
+
+    let mut r0 = r - r1 * 2 * GAMMA2;
+    r0 -= (((Q - 1) / 2 - r0) >> 31) & Q;
+
+    (r1, r0)
+}
+
+#[test]
+fn test_decomp() {
+    for i in 0..Q {
+        let mut r0_prime = i % (261888 * 2);
+        if r0_prime > 261888 {
+            r0_prime -= 261888 * 2;
+        }
+        let (r1, r0) = decompose_32(i);
+
+        if i - r0_prime == Q - 1 {
+            r0_prime -= 1;
+            assert_eq!(r0, r0_prime);
+            assert_eq!(r1, 0);
+        } else {
+            assert_eq!(r0, r0_prime);
+            assert_eq!(r1, (i - r0_prime) / (2 * 261888));
+        }
+    }
+}
+
+#[test]
+fn test_decomp2() {
+    for i in 0..Q {
+        let mut r0_prime = i % (95232 * 2);
+        if r0_prime > 95232 {
+            r0_prime -= 95232 * 2;
+        }
+        let (r1, r0) = decompose_88(i);
+
+        if i - r0_prime == Q - 1 {
+            r0_prime -= 1;
+            assert_eq!(r0, r0_prime);
+            assert_eq!(r1, 0);
+        } else {
+            assert_eq!(r0, r0_prime);
+            assert_eq!(r1, (i - r0_prime) / (2 * 95232));
         }
     }
 }
@@ -801,6 +966,26 @@ impl<const K: usize> PolyVec<K> {
     fn multiply_matvec_ntt<const L: usize>(&mut self, m: &PolyMat<K, L>, v: &PolyVec<L>) {
         for i in 0..K {
             self.v[i].dot_prod_ntt(&m.m[i], v)
+        }
+    }
+
+    fn expand_mask_gamma2pow17(&mut self, rho: &[u8; 64], mu: usize, h: &mut hash::H) {
+        let mut rho_prime = [0u8; Poly::packed_bytesize(18)];
+
+        for (r, p) in self.v.iter_mut().enumerate() {
+            h.absorb_and_squeeze(&mut rho_prime, &[rho, &u16::to_le_bytes((mu + r) as u16)]);
+
+            p.unpack_gamma_2pow17(&rho_prime);
+        }
+    }
+
+    fn expand_mask_gamma2pow19(&mut self, rho: &[u8; 64], mu: usize, h: &mut hash::H) {
+        let mut rho_prime = [0u8; Poly::packed_bytesize(20)];
+
+        for (r, p) in self.v.iter_mut().enumerate() {
+            h.absorb_and_squeeze(&mut rho_prime, &[rho, &u16::to_le_bytes((mu + r) as u16)]);
+
+            p.unpack_gamma_2pow19(&rho_prime);
         }
     }
 }
