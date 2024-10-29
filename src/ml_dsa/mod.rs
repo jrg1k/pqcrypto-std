@@ -1,7 +1,9 @@
 use core::{array, mem::MaybeUninit, ops::AddAssign};
 
+use hybrid_array::{Array, ArraySize};
 use rand_core::CryptoRngCore;
 use sha3::digest::XofReader;
+use typenum::U;
 use zeroize::Zeroize;
 
 mod hash;
@@ -62,12 +64,11 @@ pub mod mldsa44 {
     const K: usize = 4;
     const L: usize = 4;
     const ETA: usize = 2;
-    const GAMMA1: usize = 17;
 
     pub const VK_SIZE: usize = vk_size(K);
     pub const SK_SIZE: usize = sk_size(K, L, ETA);
 
-    pub type SigningKey = super::SigningKey<K, L, ETA, GAMMA1>;
+    pub type SigningKey = super::SigningKey<K, L, ETA>;
     pub type VerifyingKey = super::VerifyingKey<K>;
 }
 
@@ -77,12 +78,11 @@ pub mod mldsa65 {
     const K: usize = 6;
     const L: usize = 5;
     const ETA: usize = 4;
-    const GAMMA1: usize = 19;
 
     pub const VK_SIZE: usize = vk_size(K);
     pub const SK_SIZE: usize = sk_size(K, L, ETA);
 
-    pub type SigningKey = super::SigningKey<K, L, ETA, GAMMA1>;
+    pub type SigningKey = super::SigningKey<K, L, ETA>;
     pub type VerifyingKey = super::VerifyingKey<K>;
 }
 
@@ -92,12 +92,11 @@ pub mod mldsa87 {
     const K: usize = 8;
     const L: usize = 7;
     const ETA: usize = 2;
-    const GAMMA1: usize = 19;
 
     pub const VK_SIZE: usize = vk_size(K);
     pub const SK_SIZE: usize = sk_size(K, L, ETA);
 
-    pub type SigningKey = super::SigningKey<K, L, ETA, GAMMA1>;
+    pub type SigningKey = super::SigningKey<K, L, ETA>;
     pub type VerifyingKey = super::VerifyingKey<K>;
 }
 
@@ -157,7 +156,7 @@ impl<const K: usize> VerifyingKey<K> {
     }
 }
 
-pub struct SigningKey<const K: usize, const L: usize, const ETA: usize, const GAMMA1: usize> {
+pub struct SigningKey<const K: usize, const L: usize, const ETA: usize> {
     rho: [u8; 32],
     k: [u8; 32],
     tr: [u8; 64],
@@ -167,18 +166,14 @@ pub struct SigningKey<const K: usize, const L: usize, const ETA: usize, const GA
     a_hat: PolyMat<K, L>,
 }
 
-impl<const K: usize, const L: usize, const ETA: usize, const GAMMA1: usize> Drop
-    for SigningKey<K, L, ETA, GAMMA1>
-{
+impl<const K: usize, const L: usize, const ETA: usize> Drop for SigningKey<K, L, ETA> {
     fn drop(&mut self) {
         self.k.zeroize();
         self.tr.zeroize();
     }
 }
 
-impl<const K: usize, const L: usize, const ETA: usize, const GAMMA1: usize>
-    SigningKey<K, L, ETA, GAMMA1>
-{
+impl<const K: usize, const L: usize, const ETA: usize> SigningKey<K, L, ETA> {
     const fn uninit() -> MaybeUninit<Self> {
         MaybeUninit::uninit()
     }
@@ -324,50 +319,58 @@ impl<const K: usize, const L: usize, const ETA: usize, const GAMMA1: usize>
 
         unsafe { uninit_sk.assume_init() }
     }
+}
 
-    fn sign(&self, dst: &mut [u8], m: &[u8], rnd: &[u8; 32]) {
-        struct Tmp<const K: usize, const L: usize> {
+trait Signer<const K: usize, const L: usize, const ETA: usize> {
+    type W1Bufsize: ArraySize;
+
+    fn expand_mask(vec: &mut PolyVec<L>, rho: &[u8; 64], mu: usize, h: &mut hash::H);
+    fn decompose(x: &PolyVec<K>, x1: &mut PolyVec<K>, x0: &mut PolyVec<K>);
+    fn w1encode(dst: &mut Array<u8, Self::W1Bufsize>, w1: &PolyVec<K>);
+
+    fn sk(&self) -> &SigningKey<K, L, ETA>;
+
+    fn sign_internal(&self, dst: &mut [u8], m: &[u8], rnd: &[u8; 32]) {
+        struct Tmp<const K: usize, const L: usize, W1: ArraySize> {
             mu: [u8; 64],
             rho_prime2: [u8; 64],
             y: PolyVec<L>,
             y_hat: PolyVec<L>,
             w: PolyVec<K>,
+            w1: PolyVec<K>,
+            w0: PolyVec<K>,
+            w1_bytes: Array<u8, W1>,
         }
 
-        impl<const L: usize, const K: usize> Drop for Tmp<L, K> {
+        impl<const L: usize, const K: usize, W1: ArraySize> Drop for Tmp<L, K, W1> {
             fn drop(&mut self) {
                 self.rho_prime2.zeroize();
             }
         }
 
-        let mut uninit_tmp: MaybeUninit<Tmp<K, L>> = MaybeUninit::uninit();
+        let mut uninit_tmp: MaybeUninit<Tmp<K, L, Self::W1Bufsize>> = MaybeUninit::uninit();
         let tmp = unsafe { uninit_tmp.assume_init_mut() };
+
+        let sk = self.sk();
 
         let mut h = hash::H::init();
 
-        let mut xof = h.absorb(&[&self.tr, m]);
-        xof.read(&mut tmp.mu);
+        h.absorb_and_squeeze(&mut tmp.mu, &[&sk.tr, m]);
 
-        let mut xof = h.absorb(&[&self.k, rnd, &tmp.mu]);
-        xof.read(&mut tmp.rho_prime2);
+        h.absorb_and_squeeze(&mut tmp.rho_prime2, &[&sk.k, rnd, &tmp.mu]);
 
         let mut kappa = 0;
 
         loop {
-            match GAMMA1 {
-                17 => tmp
-                    .y
-                    .expand_mask_gamma2pow17(&tmp.rho_prime2, kappa, &mut h),
-                19 => tmp
-                    .y
-                    .expand_mask_gamma2pow19(&tmp.rho_prime2, kappa, &mut h),
-                _ => unreachable!(),
-            }
+            Self::expand_mask(&mut tmp.y, &tmp.rho_prime2, kappa, &mut h);
 
             tmp.y_hat.ntt(&tmp.y);
 
-            tmp.w.multiply_matvec_ntt(&self.a_hat, &tmp.y_hat);
+            tmp.w.multiply_matvec_ntt(&sk.a_hat, &tmp.y_hat);
             tmp.w.reduce_invntt_tomont();
+
+            Self::decompose(&tmp.w, &mut tmp.w1, &mut tmp.w0);
+            Self::w1encode(&mut tmp.w1_bytes, &tmp.w1);
         }
     }
 }
@@ -590,9 +593,17 @@ impl Poly {
         }
     }
 
-    fn decompose(&self, f: &mut Self, g: &mut Self) {
+    fn decompose_32(&self, f: &mut Self, g: &mut Self) {
         for i in 0..N {
-            let (r1, r0) = power2round(self.f[i]);
+            let (r1, r0) = decompose_32(self.f[i]);
+            f.f[i] = r1;
+            g.f[i] = r0;
+        }
+    }
+
+    fn decompose_88(&self, f: &mut Self, g: &mut Self) {
+        for i in 0..N {
+            let (r1, r0) = decompose_88(self.f[i]);
             f.f[i] = r1;
             g.f[i] = r0;
         }
@@ -617,6 +628,20 @@ impl Poly {
             a[1] = ((b[1] >> 2) | (b[2] << 6)) & 0x3FF;
             a[2] = ((b[2] >> 4) | (b[3] << 4)) & 0x3FF;
             a[3] = ((b[3] >> 6) | (b[4] << 2)) & 0x3FF;
+        }
+    }
+
+    fn pack_simple_4bit(&self, z: &mut [u8; Self::packed_bytesize(4)]) {
+        for (b, a) in z.iter_mut().zip(self.f.chunks_exact(2)) {
+            *b = (a[0] | a[1] << 4) as u8;
+        }
+    }
+
+    fn pack_simple_6bit(&self, z: &mut [u8; Self::packed_bytesize(6)]) {
+        for (b, a) in z.chunks_exact_mut(3).zip(self.f.chunks_exact(4)) {
+            b[0] = ((a[0] >> 0) | (a[1] << 6)) as u8;
+            b[1] = ((a[1] >> 2) | (a[2] << 4)) as u8;
+            b[2] = ((a[2] >> 4) | (a[3] << 2)) as u8;
         }
     }
 
@@ -924,6 +949,18 @@ impl<const K: usize> PolyVec<K> {
     fn power2round(&self, t1: &mut PolyVec<K>, t0: &mut PolyVec<K>) {
         for i in 0..K {
             self.v[i].power2round(&mut t1.v[i], &mut t0.v[i]);
+        }
+    }
+
+    fn decompose_32(&self, x1: &mut PolyVec<K>, x0: &mut PolyVec<K>) {
+        for i in 0..K {
+            self.v[i].decompose_32(&mut x1.v[i], &mut x0.v[i]);
+        }
+    }
+
+    fn decompose_88(&self, x1: &mut PolyVec<K>, x0: &mut PolyVec<K>) {
+        for i in 0..K {
+            self.v[i].decompose_88(&mut x1.v[i], &mut x0.v[i]);
         }
     }
 
