@@ -1,6 +1,5 @@
 use core::{array, mem::MaybeUninit, ops::AddAssign};
 
-use hybrid_array::{Array, ArraySize};
 use rand_core::CryptoRngCore;
 use sha3::digest::XofReader;
 use zeroize::Zeroize;
@@ -104,7 +103,7 @@ pub mod mldsa44 {
             let mut uninit_tmp: MaybeUninit<SignTmp> = MaybeUninit::uninit();
             let tmp = unsafe { uninit_tmp.assume_init_mut() };
 
-            let mut h = hash::H::init();
+            let mut h = hash::Shake::init();
 
             h.absorb_and_squeeze(&mut tmp.mu, &[&self.tr, m]);
 
@@ -262,11 +261,11 @@ impl<const K: usize, const L: usize, const ETA: usize> SigningKey<K, L, ETA> {
         let mut uninit_tmp: MaybeUninit<KeyGenTmp<K, L>> = MaybeUninit::uninit();
         let tmp = unsafe { uninit_tmp.assume_init_mut() };
 
-        let mut h = hash::H::init();
-        let mut xof = h.absorb(&[ksi, &[K as u8], &[L as u8]]);
-        xof.read(&mut self.rho);
-        xof.read(&mut tmp.rho_prime);
-        xof.read(&mut self.k);
+        let mut h = hash::Shake256::init();
+        h.absorb_multi(&[ksi, &[K as u8], &[L as u8]]);
+        h.squeeze(&mut self.rho);
+        h.squeeze(&mut tmp.rho_prime);
+        h.squeeze(&mut self.k);
 
         self.a_hat.expand_a(&self.rho);
         expand_s::<K, L, ETA>(&mut self.s1_hat, &mut self.s2_hat, &tmp.rho_prime);
@@ -282,8 +281,10 @@ impl<const K: usize, const L: usize, const ETA: usize> SigningKey<K, L, ETA> {
 
         vk_encode(vk, &self.rho, &tmp.t1);
 
-        let mut xof = h.absorb(&[vk]);
-        xof.read(&mut self.tr);
+        h.reset();
+        h.absorb(vk);
+        h.finalize();
+        h.squeeze(&mut self.tr);
 
         self.s2_hat.ntt_inplace();
         self.t0_hat.ntt_inplace();
@@ -517,44 +518,45 @@ impl Poly {
     }
 
     /// RejNTTPoly(rho)
-    fn rej_ntt(&mut self, g: &mut impl XofReader) {
-        let mut coeffs = self.f.iter_mut();
-        let mut b = [0u8; 3];
+    fn rej_ntt(&mut self, g: &mut hash::Shake128) {
+        let mut idx = 0;
 
-        loop {
-            g.read(&mut b);
+        while idx < N {
+            let bytes = g.squeezeblock();
 
-            let a = coeff_from_bytes(b[0], b[1], b[2]);
+            for b in bytes.chunks_exact(3) {
+                if let Some(a) = coeff_from_bytes(b[0], b[1], b[2]) {
+                    self.f[idx] = a;
+                    idx += 1;
+                }
 
-            if a == 0 {
-                continue;
-            }
-
-            match coeffs.next() {
-                Some(a_hat) => *a_hat = a,
-                None => break,
+                if idx == N {
+                    break;
+                }
             }
         }
     }
 
     /// RejBoundedPoly(rho)
-    fn rej_bounded<const ETA: usize>(&mut self, bytes: &[u8; 894]) {
-        let mut coeffs = self.f.iter_mut();
+    fn rej_bounded<const ETA: usize>(&mut self, h: &mut hash::Shake256) {
+        let mut idx = 0;
 
-        for b in bytes.iter() {
-            let (z0, z1) = coeffs_from_halfbytes::<ETA>(*b);
+        while idx < N {
+            let bytes = h.squeezeblock();
 
-            if let Some(z) = z0 {
-                match coeffs.next() {
-                    Some(a) => *a = z,
-                    None => break,
-                }
-            }
+            for z in bytes
+                .iter()
+                .flat_map(|b| {
+                    let (z0, z1) = coeffs_from_halfbytes::<ETA>(*b);
+                    [z0, z1]
+                })
+                .flatten()
+            {
+                self.f[idx] = z;
+                idx += 1;
 
-            if let Some(z) = z1 {
-                match coeffs.next() {
-                    Some(a) => *a = z,
-                    None => break,
+                if idx == N {
+                    break;
                 }
             }
         }
@@ -875,17 +877,17 @@ const fn power2round(mut r: i32) -> (i32, i32) {
 }
 
 /// Convert 3 bytes into an element of Z_Q.
-const fn coeff_from_bytes(b0: u8, b1: u8, b2: u8) -> i32 {
+const fn coeff_from_bytes(b0: u8, b1: u8, b2: u8) -> Option<i32> {
     let mut z = b0 as u32;
     z |= (b1 as u32) << 8;
     z |= (b2 as u32) << 16;
     z &= 0x7FFFFF;
 
     if z < Q as u32 {
-        return z as i32;
+        return Some(z as i32);
     }
 
-    0
+    None
 }
 
 const fn mod5(a: u32) -> i32 {
@@ -919,13 +921,15 @@ struct PolyMat<const K: usize, const L: usize> {
 impl<const K: usize, const L: usize> PolyMat<K, L> {
     /// ExpandA(rho)
     fn expand_a(&mut self, rho: &[u8; 32]) {
-        let mut g = hash::G::init();
+        let mut g = hash::Shake128::init();
 
         for (r, polyvec) in self.m.iter_mut().enumerate() {
             for (s, poly) in polyvec.v.iter_mut().enumerate() {
-                let mut xof = g.absorb(&[rho, &u16::to_le_bytes(((r << 8) + s) as u16)]);
+                g.absorb_multi(&[rho, &u16::to_le_bytes(((r << 8) + s) as u16)]);
 
-                poly.rej_ntt(&mut xof);
+                poly.rej_ntt(&mut g);
+
+                g.reset();
             }
         }
     }
@@ -1045,7 +1049,7 @@ impl<const K: usize> PolyVec<K> {
         }
     }
 
-    fn expand_mask_gamma2pow17(&mut self, rho: &[u8; 64], mu: usize, h: &mut hash::H) {
+    fn expand_mask_gamma2pow17(&mut self, rho: &[u8; 64], mu: usize, h: &mut hash::Shake256) {
         let mut rho_prime = [0u8; Poly::packed_bytesize(18)];
 
         for (r, p) in self.v.iter_mut().enumerate() {
@@ -1055,7 +1059,7 @@ impl<const K: usize> PolyVec<K> {
         }
     }
 
-    fn expand_mask_gamma2pow19(&mut self, rho: &[u8; 64], mu: usize, h: &mut hash::H) {
+    fn expand_mask_gamma2pow19(&mut self, rho: &[u8; 64], mu: usize, h: &mut hash::Shake256) {
         let mut rho_prime = [0u8; Poly::packed_bytesize(20)];
 
         for (r, p) in self.v.iter_mut().enumerate() {
@@ -1080,13 +1084,12 @@ fn expand_s<const K: usize, const L: usize, const ETA: usize>(
     s2: &mut PolyVec<K>,
     rho: &[u8; 64],
 ) {
-    let mut h = hash::H::init();
-
-    let mut buf = [0u8; 894];
+    let mut h = hash::Shake256::init();
 
     for (nonce, poly) in s1.v.iter_mut().chain(s2.v.iter_mut()).enumerate() {
-        h.absorb_and_squeeze(&mut buf, &[rho, &u16::to_le_bytes(nonce as u16)]);
-        poly.rej_bounded::<ETA>(&buf);
+        h.absorb_multi(&[rho, &u16::to_le_bytes(nonce as u16)]);
+        poly.rej_bounded::<ETA>(&mut h);
+        h.reset();
     }
 }
 

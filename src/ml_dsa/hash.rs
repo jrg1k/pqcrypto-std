@@ -1,20 +1,92 @@
 use core::mem;
 
-use sha3::{
-    digest::{ExtendableOutputReset, Update, XofReader},
-    Shake128, Shake256,
-};
+pub const SHAKE_128_RATE: usize = 168;
+pub const SHAKE_256_RATE: usize = 136;
 
-pub struct H {
-    h: Shake256,
+pub type Shake128 = Shake<SHAKE_128_RATE>;
+pub type Shake256 = Shake<SHAKE_256_RATE>;
+
+const BLOCK_SIZE: usize = 25 * 8;
+
+#[inline(always)]
+fn keccak_permute_block(block: &mut [u8; BLOCK_SIZE]) {
+    keccak::f1600(unsafe { mem::transmute::<&mut [u8; BLOCK_SIZE], &mut [u64; 25]>(block) });
 }
 
-impl H {
-    #[inline]
-    pub fn init() -> Self {
+pub struct Shake<const R: usize> {
+    block: [u8; BLOCK_SIZE],
+    pos: usize,
+}
+
+impl<const R: usize> Shake<R> {
+    pub const fn init() -> Self {
         Self {
-            h: Shake256::default(),
+            block: [0; BLOCK_SIZE],
+            pos: 0,
         }
+    }
+
+    pub fn absorb_multi<const K: usize>(&mut self, src: &[&[u8]; K]) {
+        for x in src {
+            self.absorb(x);
+        }
+
+        self.finalize();
+    }
+
+    pub fn absorb(&mut self, src: &[u8]) {
+        let mut rem = src.len();
+        let mut idx = 0;
+        while self.pos + rem >= R {
+            for i in self.pos..R {
+                self.block[i] ^= src[idx];
+                idx += 1;
+                rem -= 1;
+            }
+
+            keccak_permute_block(&mut self.block);
+
+            self.pos = 0;
+        }
+
+        for i in self.pos..self.pos + rem {
+            self.block[i] ^= src[idx];
+            idx += 1;
+        }
+
+        self.pos += rem;
+    }
+
+    pub fn finalize(&mut self) {
+        self.block[self.pos] ^= 0x1F;
+        self.block[R - 1] ^= 1 << 7;
+        self.pos = R;
+    }
+
+    pub fn squeeze<const K: usize>(&mut self, dst: &mut [u8; K]) {
+        let mut out_idx = 0;
+
+        while out_idx < dst.len() {
+            if self.pos == R {
+                keccak_permute_block(&mut self.block);
+
+                self.pos = 0;
+            }
+
+            let n = self.rem().min(dst.len() - out_idx);
+
+            for _ in 0..n {
+                dst[out_idx] = self.block[self.pos];
+                self.pos += 1;
+                out_idx += 1;
+            }
+        }
+    }
+
+    pub fn squeezeblock(&mut self) -> &[u8; R] {
+        keccak_permute_block(&mut self.block);
+
+        unsafe { self.block[..R].first_chunk().unwrap_unchecked() }
     }
 
     pub fn absorb_and_squeeze<const N: usize, const M: usize>(
@@ -22,136 +94,21 @@ impl H {
         dst: &mut [u8; N],
         src: &[&[u8]; M],
     ) {
-        for s in src {
-            self.h.update(s);
-        }
-        self.h.finalize_xof_reset_into(dst);
-    }
-
-    #[inline]
-    pub fn absorb<const N: usize>(&mut self, src: &[&[u8]; N]) -> impl XofReader {
-        for s in src {
-            self.h.update(s);
+        for x in src {
+            self.absorb(x);
         }
 
-        self.h.finalize_xof_reset()
-    }
-}
-
-pub struct G {
-    h: Shake128,
-}
-
-impl G {
-    #[inline]
-    pub fn init() -> Self {
-        Self {
-            h: Shake128::default(),
-        }
+        self.finalize();
+        self.squeeze(dst);
+        self.reset();
     }
 
-    #[inline]
-    pub fn absorb<const N: usize>(&mut self, src: &[&[u8]; N]) -> impl XofReader {
-        for s in src {
-            self.h.update(s);
-        }
-
-        self.h.finalize_xof_reset()
-    }
-}
-
-const SHAKE_256_RATE: usize = 136;
-
-struct H2 {
-    block: [u8; 25 * 8],
-    pos: usize,
-}
-
-impl H2 {
-    #[inline]
-    fn init() -> Self {
-        Self {
-            block: [0; 25 * 8],
-            pos: 0,
-        }
+    pub fn reset(&mut self) {
+        self.block.fill(0);
+        self.pos = 0;
     }
 
-    fn absorb(&mut self, mut src: &[u8]) {
-        while self.pos + src.len() >= SHAKE_256_RATE {
-            for (a, b) in self.block[self.pos..SHAKE_256_RATE]
-                .iter_mut()
-                .zip(src.iter())
-            {
-                *a ^= b;
-            }
-
-            src = &src[SHAKE_256_RATE - self.pos..];
-
-            keccak::f1600(unsafe {
-                mem::transmute::<&mut [u8; 25 * 8], &mut [u64; 25]>(&mut self.block)
-            });
-
-            self.pos = 0;
-        }
-
-        for (a, b) in self.block[self.pos..].iter_mut().zip(src.iter()) {
-            *a ^= b;
-        }
+    const fn rem(&self) -> usize {
+        R - self.pos
     }
-
-    fn finalize(&mut self) {
-        self.block[self.pos] ^= 0x1F;
-        self.block[SHAKE_256_RATE - 1] ^= 1 << 7;
-        self.pos = SHAKE_256_RATE;
-    }
-
-    fn squeeze(&mut self, dst: &mut [u8]) {
-        let mut out_idx = 0;
-
-        while out_idx < dst.len() {
-            if self.pos == SHAKE_256_RATE {
-                keccak::f1600(unsafe {
-                    mem::transmute::<&mut [u8; 25 * 8], &mut [u64; 25]>(&mut self.block)
-                });
-
-                self.pos = 0;
-            }
-
-            for _ in 0..(SHAKE_256_RATE - self.pos).min(dst.len() - out_idx) {
-                dst[out_idx] = self.block[self.pos];
-                self.pos += 1;
-                out_idx += 1;
-            }
-        }
-    }
-}
-
-const fn bytes_to_u64(b: &[u8]) -> u64 {
-    let mut i = 0;
-    let mut out = 0;
-
-    while i < b.len() {
-        out |= (b[i] as u64) << (i << 3);
-        i += 1;
-    }
-
-    out
-}
-
-#[test]
-fn test_shake() {
-    let input = [1, 2, 3, 4];
-    let mut out0 = [0u8; 2];
-    let mut out1 = [0u8; 2];
-
-    let mut h = H::init();
-    let mut h2 = H2::init();
-
-    h.absorb_and_squeeze(&mut out0, &[&input]);
-
-    h2.absorb(&input);
-    h2.finalize();
-    h2.squeeze(&mut out1);
-
-    assert_eq!(out0, out1);
 }
