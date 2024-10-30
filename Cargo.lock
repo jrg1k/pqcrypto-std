@@ -134,6 +134,7 @@ version = "0.1.1"
 dependencies = [
  "hex",
  "hybrid-array",
+ "keccak",
  "rand",
  "rand_core",
  "serde",

@@ -3,7 +3,6 @@ use core::{array, mem::MaybeUninit, ops::AddAssign};
 use hybrid_array::{Array, ArraySize};
 use rand_core::CryptoRngCore;
 use sha3::digest::XofReader;
-use typenum::U;
 use zeroize::Zeroize;
 
 mod hash;
@@ -58,18 +57,77 @@ const fn sk_size(k: usize, l: usize, eta: usize) -> usize {
     }
 }
 
+const fn w1_size<const GAMMA2: usize>() -> usize {
+    ((Q as usize - 1) / (2 * GAMMA2) - 1).ilog2() as usize
+}
+
+const fn c_tilde_size<const LAMBDA: usize>() -> usize {
+    LAMBDA >> 2
+}
+
+struct SignTmp<const K: usize, const L: usize, const W1_BZ: usize, const CT: usize> {
+    mu: [u8; 64],
+    rho_prime2: [u8; 64],
+    y: PolyVec<L>,
+    y_hat: PolyVec<L>,
+    w: PolyVec<K>,
+    w1: PolyVec<K>,
+    w0: PolyVec<K>,
+    w1_bytes: [u8; W1_BZ],
+    c_tilde: [u8; CT],
+    c: Poly,
+}
+
 pub mod mldsa44 {
-    use super::{sk_size, vk_size};
+    use core::mem::MaybeUninit;
+
+    use crate::ml_dsa::hash;
+
+    use super::{c_tilde_size, sk_size, vk_size, w1_size, Q};
 
     const K: usize = 4;
     const L: usize = 4;
     const ETA: usize = 2;
+    const GAMMA2: usize = (Q as usize - 1) / 88;
+    const LAMBDA: usize = 128;
 
     pub const VK_SIZE: usize = vk_size(K);
     pub const SK_SIZE: usize = sk_size(K, L, ETA);
 
     pub type SigningKey = super::SigningKey<K, L, ETA>;
     pub type VerifyingKey = super::VerifyingKey<K>;
+
+    type SignTmp = super::SignTmp<K, L, { w1_size::<GAMMA2>() }, { c_tilde_size::<LAMBDA>() }>;
+
+    impl SigningKey {
+        fn sign_internal(&self, dst: &mut [u8], m: &[u8], rnd: &[u8; 32]) {
+            let mut uninit_tmp: MaybeUninit<SignTmp> = MaybeUninit::uninit();
+            let tmp = unsafe { uninit_tmp.assume_init_mut() };
+
+            let mut h = hash::H::init();
+
+            h.absorb_and_squeeze(&mut tmp.mu, &[&self.tr, m]);
+
+            h.absorb_and_squeeze(&mut tmp.rho_prime2, &[&self.k, rnd, &tmp.mu]);
+
+            let mut kappa = 0;
+
+            loop {
+                tmp.y
+                    .expand_mask_gamma2pow17(&tmp.rho_prime2, kappa, &mut h);
+
+                tmp.y_hat.ntt(&tmp.y);
+
+                tmp.w.multiply_matvec_ntt(&self.a_hat, &tmp.y_hat);
+                tmp.w.reduce_invntt_tomont();
+
+                tmp.w.decompose_88(&mut tmp.w1, &mut tmp.w0);
+                tmp.w1.pack_simple_6bit(&mut tmp.w1_bytes);
+                h.absorb_and_squeeze(&mut tmp.c_tilde, &[&tmp.mu, &tmp.w1_bytes]);
+                // tmp.c.sample_in_ball(bytes);
+            }
+        }
+    }
 }
 
 pub mod mldsa65 {
@@ -321,60 +379,6 @@ impl<const K: usize, const L: usize, const ETA: usize> SigningKey<K, L, ETA> {
     }
 }
 
-trait Signer<const K: usize, const L: usize, const ETA: usize> {
-    type W1Bufsize: ArraySize;
-
-    fn expand_mask(vec: &mut PolyVec<L>, rho: &[u8; 64], mu: usize, h: &mut hash::H);
-    fn decompose(x: &PolyVec<K>, x1: &mut PolyVec<K>, x0: &mut PolyVec<K>);
-    fn w1encode(dst: &mut Array<u8, Self::W1Bufsize>, w1: &PolyVec<K>);
-
-    fn sk(&self) -> &SigningKey<K, L, ETA>;
-
-    fn sign_internal(&self, dst: &mut [u8], m: &[u8], rnd: &[u8; 32]) {
-        struct Tmp<const K: usize, const L: usize, W1: ArraySize> {
-            mu: [u8; 64],
-            rho_prime2: [u8; 64],
-            y: PolyVec<L>,
-            y_hat: PolyVec<L>,
-            w: PolyVec<K>,
-            w1: PolyVec<K>,
-            w0: PolyVec<K>,
-            w1_bytes: Array<u8, W1>,
-        }
-
-        impl<const L: usize, const K: usize, W1: ArraySize> Drop for Tmp<L, K, W1> {
-            fn drop(&mut self) {
-                self.rho_prime2.zeroize();
-            }
-        }
-
-        let mut uninit_tmp: MaybeUninit<Tmp<K, L, Self::W1Bufsize>> = MaybeUninit::uninit();
-        let tmp = unsafe { uninit_tmp.assume_init_mut() };
-
-        let sk = self.sk();
-
-        let mut h = hash::H::init();
-
-        h.absorb_and_squeeze(&mut tmp.mu, &[&sk.tr, m]);
-
-        h.absorb_and_squeeze(&mut tmp.rho_prime2, &[&sk.k, rnd, &tmp.mu]);
-
-        let mut kappa = 0;
-
-        loop {
-            Self::expand_mask(&mut tmp.y, &tmp.rho_prime2, kappa, &mut h);
-
-            tmp.y_hat.ntt(&tmp.y);
-
-            tmp.w.multiply_matvec_ntt(&sk.a_hat, &tmp.y_hat);
-            tmp.w.reduce_invntt_tomont();
-
-            Self::decompose(&tmp.w, &mut tmp.w1, &mut tmp.w0);
-            Self::w1encode(&mut tmp.w1_bytes, &tmp.w1);
-        }
-    }
-}
-
 struct Poly {
     f: [i32; N],
 }
@@ -534,14 +538,11 @@ impl Poly {
     }
 
     /// RejBoundedPoly(rho)
-    fn rej_bounded<const ETA: usize>(&mut self, h: &mut impl XofReader) {
+    fn rej_bounded<const ETA: usize>(&mut self, bytes: &[u8; 894]) {
         let mut coeffs = self.f.iter_mut();
-        let mut b = [0u8; 1];
 
-        loop {
-            h.read(&mut b);
-
-            let (z0, z1) = coeffs_from_halfbytes::<ETA>(b[0]);
+        for b in bytes.iter() {
+            let (z0, z1) = coeffs_from_halfbytes::<ETA>(*b);
 
             if let Some(z) = z0 {
                 match coeffs.next() {
@@ -556,6 +557,26 @@ impl Poly {
                     None => break,
                 }
             }
+        }
+    }
+
+    /// SampleInBall(rho)
+    fn sample_in_ball<const TAU: usize>(&mut self, bytes: &[u8; 221]) {
+        let mut h = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+
+        let mut iter = bytes[8..].iter();
+
+        for i in N - TAU..N {
+            let j = if let Some(j) = iter.by_ref().find(|b| (**b as usize) <= i) {
+                *j as usize
+            } else {
+                break;
+            };
+
+            self.f[i] = self.f[j];
+            self.f[j] = 1 - ((h as usize & 1) << 1) as i32;
+
+            h >>= 1;
         }
     }
 
@@ -1000,6 +1021,24 @@ impl<const K: usize> PolyVec<K> {
         }
     }
 
+    fn pack_simple_4bit<const BZ: usize>(&self, z: &mut [u8; BZ]) {
+        for (chunk, p) in z
+            .chunks_exact_mut(Poly::packed_bytesize(4))
+            .zip(self.v.iter())
+        {
+            p.pack_simple_4bit(chunk.try_into().unwrap());
+        }
+    }
+
+    fn pack_simple_6bit<const BZ: usize>(&self, z: &mut [u8; BZ]) {
+        for (chunk, p) in z
+            .chunks_exact_mut(Poly::packed_bytesize(6))
+            .zip(self.v.iter())
+        {
+            p.pack_simple_6bit(chunk.try_into().unwrap());
+        }
+    }
+
     fn multiply_matvec_ntt<const L: usize>(&mut self, m: &PolyMat<K, L>, v: &PolyVec<L>) {
         for i in 0..K {
             self.v[i].dot_prod_ntt(&m.m[i], v)
@@ -1043,9 +1082,11 @@ fn expand_s<const K: usize, const L: usize, const ETA: usize>(
 ) {
     let mut h = hash::H::init();
 
+    let mut buf = [0u8; 894];
+
     for (nonce, poly) in s1.v.iter_mut().chain(s2.v.iter_mut()).enumerate() {
-        let mut xof = h.absorb(&[rho, &u16::to_le_bytes(nonce as u16)]);
-        poly.rej_bounded::<ETA>(&mut xof);
+        h.absorb_and_squeeze(&mut buf, &[rho, &u16::to_le_bytes(nonce as u16)]);
+        poly.rej_bounded::<ETA>(&buf);
     }
 }
 
