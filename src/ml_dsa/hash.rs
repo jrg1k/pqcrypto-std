@@ -49,12 +49,12 @@ impl<const R: usize> Shake<R> {
             self.pos = 0;
         }
 
-        for i in self.pos..self.pos + rem {
-            self.block[i] ^= src[idx];
+        while idx < src.len() {
+            self.block[self.pos] ^= src[idx];
+
+            self.pos += 1;
             idx += 1;
         }
-
-        self.pos += rem;
     }
 
     pub fn finalize(&mut self) {

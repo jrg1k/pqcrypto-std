@@ -1,9 +1,13 @@
-use core::{array, mem::MaybeUninit, ops::AddAssign};
+use core::{
+    array,
+    mem::MaybeUninit,
+    ops::{AddAssign, Mul, SubAssign},
+};
 
 use rand_core::CryptoRngCore;
-use sha3::digest::XofReader;
 use zeroize::Zeroize;
 
+mod coeff;
 mod hash;
 mod reduce;
 
@@ -73,8 +77,8 @@ struct SignTmp<const K: usize, const L: usize, const W1_BZ: usize, const CT: usi
     w1: PolyVec<K>,
     w0: PolyVec<K>,
     w1_bytes: [u8; W1_BZ],
-    c_tilde: [u8; CT],
-    c: Poly,
+    z: PolyVec<K>,
+    h: PolyVec<K>,
 }
 
 pub mod mldsa44 {
@@ -82,13 +86,17 @@ pub mod mldsa44 {
 
     use crate::ml_dsa::hash;
 
-    use super::{c_tilde_size, sk_size, vk_size, w1_size, Q};
+    use super::{c_tilde_size, sk_size, vk_size, w1_size, Poly, PolyVec, Q};
 
     const K: usize = 4;
     const L: usize = 4;
     const ETA: usize = 2;
+    const GAMMA1: usize = 1 << 17;
     const GAMMA2: usize = (Q as usize - 1) / 88;
     const LAMBDA: usize = 128;
+    const TAU: usize = 39;
+    const BETA: i32 = (TAU * ETA) as i32;
+    const OMEGA: usize = 80;
 
     pub const VK_SIZE: usize = vk_size(K);
     pub const SK_SIZE: usize = sk_size(K, L, ETA);
@@ -99,9 +107,11 @@ pub mod mldsa44 {
     type SignTmp = super::SignTmp<K, L, { w1_size::<GAMMA2>() }, { c_tilde_size::<LAMBDA>() }>;
 
     impl SigningKey {
-        fn sign_internal(&self, dst: &mut [u8], m: &[u8], rnd: &[u8; 32]) {
+        pub(super) fn sign_internal(&self, dst: &mut [u8], m: &[u8], rnd: &[u8; 32]) {
             let mut uninit_tmp: MaybeUninit<SignTmp> = MaybeUninit::uninit();
             let tmp = unsafe { uninit_tmp.assume_init_mut() };
+
+            let (c_tilde, dst): (&mut [u8; LAMBDA / 4], _) = dst.split_first_chunk_mut().unwrap();
 
             let mut h = hash::Shake::init();
 
@@ -109,21 +119,64 @@ pub mod mldsa44 {
 
             h.absorb_and_squeeze(&mut tmp.rho_prime2, &[&self.k, rnd, &tmp.mu]);
 
-            let mut kappa = 0;
-
-            loop {
+            for nonce in 0.. {
                 tmp.y
-                    .expand_mask_gamma2pow17(&tmp.rho_prime2, kappa, &mut h);
+                    .expand_mask_gamma2pow17(&tmp.rho_prime2, nonce, &mut h);
 
                 tmp.y_hat.ntt(&tmp.y);
 
                 tmp.w.multiply_matvec_ntt(&self.a_hat, &tmp.y_hat);
-                tmp.w.reduce_invntt_tomont();
+                tmp.w.reduce_invntt_tomont_inplace();
 
                 tmp.w.decompose_88(&mut tmp.w1, &mut tmp.w0);
                 tmp.w1.pack_simple_6bit(&mut tmp.w1_bytes);
-                h.absorb_and_squeeze(&mut tmp.c_tilde, &[&tmp.mu, &tmp.w1_bytes]);
-                // tmp.c.sample_in_ball(bytes);
+
+                h.absorb_and_squeeze(c_tilde, &[&tmp.mu, &tmp.w1_bytes]);
+                h.absorb(c_tilde);
+                let mut c_hat = Poly::sample_in_ball::<TAU>(&mut h);
+                c_hat.ntt_inplace();
+
+                tmp.z.multiply_poly_ntt(&c_hat, &self.s1_hat);
+                tmp.z.invntt_tomont_inplace();
+                tmp.z += &tmp.y;
+                tmp.z.reduce();
+
+                if !tmp.z.norm_in_bound::<{ GAMMA1 as i32 - BETA }>() {
+                    continue;
+                }
+
+                tmp.h.multiply_poly_ntt(&c_hat, &self.s2_hat);
+                tmp.h.invntt_tomont_inplace();
+                tmp.w0 -= &tmp.h;
+                tmp.w0.reduce();
+
+                if !tmp.w0.norm_in_bound::<{ GAMMA2 as i32 - BETA }>() {
+                    continue;
+                }
+
+                tmp.h.multiply_poly_ntt(&c_hat, &self.t0_hat);
+                tmp.h.invntt_tomont_inplace();
+
+                if !tmp.h.norm_in_bound::<{ GAMMA2 as i32 }>() {
+                    continue;
+                }
+
+                tmp.w0 += &tmp.h;
+
+                if tmp.h.make_hint::<{ GAMMA2 as i32 }>(&tmp.w0, &tmp.w1) > OMEGA {
+                    continue;
+                }
+
+                break;
+            }
+
+            tmp.z.bitpack_2pow17(dst);
+
+            tmp.h
+                .hint_bitpack::<OMEGA>(&mut dst[PolyVec::<K>::packed_bytesize(18)..]);
+
+            for i in 0..L {
+                // tmp.z.v[i].pack
             }
         }
     }
@@ -273,7 +326,7 @@ impl<const K: usize, const L: usize, const ETA: usize> SigningKey<K, L, ETA> {
         self.s1_hat.ntt_inplace();
 
         tmp.t.multiply_matvec_ntt(&self.a_hat, &self.s1_hat);
-        tmp.t.reduce_invntt_tomont();
+        tmp.t.reduce_invntt_tomont_inplace();
 
         tmp.t += &self.s2_hat;
 
@@ -391,6 +444,10 @@ impl Drop for Poly {
 }
 
 impl Poly {
+    const fn zero() -> Self {
+        Self { f: [0; N] }
+    }
+
     /// NTT(w)
     fn ntt_inplace(&mut self) {
         let w = &mut self.f;
@@ -525,7 +582,7 @@ impl Poly {
             let bytes = g.squeezeblock();
 
             for b in bytes.chunks_exact(3) {
-                if let Some(a) = coeff_from_bytes(b[0], b[1], b[2]) {
+                if let Some(a) = coeff::from_three_bytes(b[0], b[1], b[2]) {
                     self.f[idx] = a;
                     idx += 1;
                 }
@@ -547,7 +604,7 @@ impl Poly {
             for z in bytes
                 .iter()
                 .flat_map(|b| {
-                    let (z0, z1) = coeffs_from_halfbytes::<ETA>(*b);
+                    let (z0, z1) = coeff::from_halfbytes::<ETA>(*b);
                     [z0, z1]
                 })
                 .flatten()
@@ -563,23 +620,35 @@ impl Poly {
     }
 
     /// SampleInBall(rho)
-    fn sample_in_ball<const TAU: usize>(&mut self, bytes: &[u8; 221]) {
-        let mut h = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+    fn sample_in_ball<const TAU: usize>(h: &mut hash::Shake256) -> Self {
+        let mut poly = Self { f: [0; N] };
 
-        let mut iter = bytes[8..].iter();
+        let mut block = h.squeezeblock();
 
-        for i in N - TAU..N {
-            let j = if let Some(j) = iter.by_ref().find(|b| (**b as usize) <= i) {
+        let mut hash = u64::from_le_bytes(block[..8].try_into().unwrap());
+
+        let mut iter = block[8..].iter();
+
+        let mut idx = N - TAU;
+
+        while idx < N {
+            let j = if let Some(j) = iter.by_ref().find(|b| (**b as usize) <= idx) {
                 *j as usize
             } else {
-                break;
+                block = h.squeezeblock();
+                iter = block.iter();
+                continue;
             };
 
-            self.f[i] = self.f[j];
-            self.f[j] = 1 - ((h as usize & 1) << 1) as i32;
+            poly.f[idx] = poly.f[j];
+            poly.f[j] = 1 - ((hash as usize & 1) << 1) as i32;
 
-            h >>= 1;
+            hash >>= 1;
+            idx += 1;
         }
+
+        h.reset();
+        poly
     }
 
     fn multiply_ntt_acc(&mut self, a: &Self, b: &Self) {
@@ -610,7 +679,7 @@ impl Poly {
 
     fn power2round(&self, f: &mut Self, g: &mut Self) {
         for i in 0..N {
-            let (r1, r0) = power2round(self.f[i]);
+            let (r1, r0) = coeff::power2round(self.f[i]);
             f.f[i] = r1;
             g.f[i] = r0;
         }
@@ -618,7 +687,7 @@ impl Poly {
 
     fn decompose_32(&self, f: &mut Self, g: &mut Self) {
         for i in 0..N {
-            let (r1, r0) = decompose_32(self.f[i]);
+            let (r1, r0) = coeff::decompose_32(self.f[i]);
             f.f[i] = r1;
             g.f[i] = r0;
         }
@@ -626,7 +695,7 @@ impl Poly {
 
     fn decompose_88(&self, f: &mut Self, g: &mut Self) {
         for i in 0..N {
-            let (r1, r0) = decompose_88(self.f[i]);
+            let (r1, r0) = coeff::decompose_88(self.f[i]);
             f.f[i] = r1;
             g.f[i] = r0;
         }
@@ -712,7 +781,7 @@ impl Poly {
 
     const PACKED_13BIT: usize = (N * 13) / 8;
 
-    fn pack_eta_2powdm1(&self, z: &mut [u8; Self::PACKED_13BIT]) {
+    fn bitpack_2pow17(&self, z: &mut [u8; Self::packed_bytesize(18)]) {
         const ETA: i32 = 1 << (D - 1);
 
         for (b, a) in z.chunks_exact_mut(13).zip(self.f.chunks_exact(8)) {
@@ -751,6 +820,24 @@ impl Poly {
         }
     }
 
+    fn pack_gamma_2pow17(&self, z: &mut [u8; Self::packed_bytesize(18)]) {
+        const B: i32 = 1 << 17;
+
+        for (b, a) in z.chunks_exact_mut(9).zip(self.f.chunks_exact(4)) {
+            let a: [i32; 4] = array::from_fn(|i| B - a[i]);
+
+            b[0] = (a[0] >> 0) as u8;
+            b[1] = (a[0] >> 8) as u8;
+            b[2] = ((a[0] >> 16) | (a[1] << 2)) as u8;
+            b[3] = (a[1] >> 6) as u8;
+            b[4] = ((a[1] >> 14) | (a[2] << 4)) as u8;
+            b[5] = (a[2] >> 4) as u8;
+            b[6] = ((a[2] >> 12) | (a[3] << 6)) as u8;
+            b[7] = (a[3] >> 2) as u8;
+            b[8] = (a[3] >> 10) as u8;
+        }
+    }
+
     fn unpack_gamma_2pow17(&mut self, z: &[u8; Self::packed_bytesize(18)]) {
         const B: i32 = 1 << 17;
         const BITMASK: i32 = 0x3ffff;
@@ -762,6 +849,21 @@ impl Poly {
             a[1] = B - (((b[2] >> 2) | (b[3] << 6) | (b[4] << 14)) & BITMASK);
             a[2] = B - (((b[4] >> 4) | (b[5] << 4) | (b[6] << 12)) & BITMASK);
             a[3] = B - (((b[6] >> 6) | (b[7] << 2) | (b[8] << 10)) & BITMASK);
+        }
+    }
+
+    fn bitpack_2pow19(&self, z: &mut [u8; Self::packed_bytesize(20)]) {
+        const B: i32 = 1 << 19;
+
+        for (b, a) in z.chunks_exact_mut(5).zip(self.f.chunks_exact(2)) {
+            let a0 = B - a[0];
+            let a1 = B - a[1];
+
+            b[0] = (a0 >> 0) as u8;
+            b[1] = (a0 >> 8) as u8;
+            b[2] = ((a0 >> 16) | (a1 << 4)) as u8;
+            b[3] = (a1 >> 4) as u8;
+            b[4] = (a1 >> 12) as u8;
         }
     }
 
@@ -780,137 +882,41 @@ impl Poly {
     const fn packed_bytesize(bitlen: usize) -> usize {
         (N * bitlen) / 8
     }
+
+    fn norm_in_bound<const B: i32>(&self) -> bool {
+        self.f.iter().all(|w| norm(*w) < B)
+    }
+
+    fn make_hint<const G2: i32>(&mut self, f: &Poly, g: &Poly) -> usize {
+        let mut sum = 0;
+        for i in 0..N {
+            let h = coeff::make_hint::<G2>(f.f[i], g.f[i]);
+
+            self.f[i] = h;
+            sum += h as usize;
+        }
+
+        sum
+    }
 }
 
-impl AddAssign<&Poly> for Poly {
-    fn add_assign(&mut self, rhs: &Poly) {
-        for (a, b) in self.f.iter_mut().zip(rhs.f.iter()) {
-            *a += b;
+const fn norm(w: i32) -> i32 {
+    w - ((w >> 31) & (w << 1))
+}
+
+impl AddAssign<&Self> for Poly {
+    fn add_assign(&mut self, rhs: &Self) {
+        for i in 0..N {
+            self.f[i] += rhs.f[i];
         }
     }
 }
 
-const fn decompose_88(mut r: i32) -> (i32, i32) {
-    const GAMMA2: i32 = (Q - 1) / 88;
-    const M: i32 = ((1 << 30) / (GAMMA2 as i64)) as i32;
-    const R1_MAX: i32 = (Q - 1) / (2 * GAMMA2);
-
-    r += (r >> 31) & Q;
-
-    let mut r1 = (r + 255) >> 8;
-    r1 = (r1 * M + (1 << 22)) >> 23;
-    r1 ^= ((R1_MAX - 1 - r1) >> 31) & r1;
-
-    let mut r0 = r - r1 * 2 * GAMMA2;
-    r0 -= (((Q - 1) / 2 - r0) >> 31) & Q;
-
-    (r1, r0)
-}
-
-const fn decompose_32(mut r: i32) -> (i32, i32) {
-    const GAMMA2: i32 = (Q - 1) / 32;
-    const M: i32 = ((1 << 28) / (GAMMA2 as i64)) as i32;
-    const R1_MAX: i32 = (Q - 1) / (2 * GAMMA2);
-
-    r += (r >> 31) & Q;
-
-    let mut r1 = (r + 255) >> 8;
-    r1 = (r1 * M + (1 << 20)) >> 21;
-    r1 &= R1_MAX - 1;
-
-    let mut r0 = r - r1 * 2 * GAMMA2;
-    r0 -= (((Q - 1) / 2 - r0) >> 31) & Q;
-
-    (r1, r0)
-}
-
-#[test]
-fn test_decomp() {
-    for i in 0..Q {
-        let mut r0_prime = i % (261888 * 2);
-        if r0_prime > 261888 {
-            r0_prime -= 261888 * 2;
+impl SubAssign<&Self> for Poly {
+    fn sub_assign(&mut self, rhs: &Self) {
+        for i in 0..N {
+            self.f[i] -= rhs.f[i];
         }
-        let (r1, r0) = decompose_32(i);
-
-        if i - r0_prime == Q - 1 {
-            r0_prime -= 1;
-            assert_eq!(r0, r0_prime);
-            assert_eq!(r1, 0);
-        } else {
-            assert_eq!(r0, r0_prime);
-            assert_eq!(r1, (i - r0_prime) / (2 * 261888));
-        }
-    }
-}
-
-#[test]
-fn test_decomp2() {
-    for i in 0..Q {
-        let mut r0_prime = i % (95232 * 2);
-        if r0_prime > 95232 {
-            r0_prime -= 95232 * 2;
-        }
-        let (r1, r0) = decompose_88(i);
-
-        if i - r0_prime == Q - 1 {
-            r0_prime -= 1;
-            assert_eq!(r0, r0_prime);
-            assert_eq!(r1, 0);
-        } else {
-            assert_eq!(r0, r0_prime);
-            assert_eq!(r1, (i - r0_prime) / (2 * 95232));
-        }
-    }
-}
-
-/// Decomposes r into (r1, r0) such that r = r1*2^d + r0 (mod Q)
-const fn power2round(mut r: i32) -> (i32, i32) {
-    r += (r >> 31) & Q;
-
-    let q = (1 << (D - 1)) - 1;
-
-    let r1 = (r + q) >> D;
-    let r0 = r - (r1 << D);
-
-    (r1, r0)
-}
-
-/// Convert 3 bytes into an element of Z_Q.
-const fn coeff_from_bytes(b0: u8, b1: u8, b2: u8) -> Option<i32> {
-    let mut z = b0 as u32;
-    z |= (b1 as u32) << 8;
-    z |= (b2 as u32) << 16;
-    z &= 0x7FFFFF;
-
-    if z < Q as u32 {
-        return Some(z as i32);
-    }
-
-    None
-}
-
-const fn mod5(a: u32) -> i32 {
-    const DIV_SHIFT: usize = 10;
-    const M: u32 = ((1 << DIV_SHIFT) + 3) / 5;
-    (a - ((a * M) >> DIV_SHIFT) * 5) as i32
-}
-
-/// Convert two half-bytes into two elements of Z_Q.
-const fn coeffs_from_halfbytes<const ETA: usize>(b: u8) -> (Option<i32>, Option<i32>) {
-    let b0 = (b & 0xF) as u32;
-    let b1 = (b >> 4) as u32;
-
-    match ETA {
-        2 => (
-            if b0 < 15 { Some(2 - mod5(b0)) } else { None },
-            if b1 < 15 { Some(2 - mod5(b1)) } else { None },
-        ),
-        4 => (
-            if b0 < 9 { Some(4 - b0 as i32) } else { None },
-            if b1 < 9 { Some(4 - b1 as i32) } else { None },
-        ),
-        _ => unreachable!(),
     }
 }
 
@@ -940,6 +946,16 @@ struct PolyVec<const K: usize> {
 }
 
 impl<const K: usize> PolyVec<K> {
+    const fn zero() -> Self {
+        Self {
+            v: [const { Poly::zero() }; K],
+        }
+    }
+
+    const fn packed_bytesize(coeff_bitlen: usize) -> usize {
+        K * Poly::packed_bytesize(coeff_bitlen)
+    }
+
     fn ntt_inplace(&mut self) {
         for p in self.v.iter_mut() {
             p.ntt_inplace();
@@ -963,10 +979,21 @@ impl<const K: usize> PolyVec<K> {
             p.invntt_inplace();
         }
     }
-
-    fn reduce_invntt_tomont(&mut self) {
+    fn reduce(&mut self) {
         for p in self.v.iter_mut() {
             p.reduce();
+        }
+    }
+
+    fn reduce_invntt_tomont_inplace(&mut self) {
+        for p in self.v.iter_mut() {
+            p.reduce();
+            p.invntt_tomont_inplace();
+        }
+    }
+
+    fn invntt_tomont_inplace(&mut self) {
+        for p in self.v.iter_mut() {
             p.invntt_tomont_inplace();
         }
     }
@@ -1015,7 +1042,7 @@ impl<const K: usize> PolyVec<K> {
 
     fn pack_eta_2powdm1(&self, z: &mut [u8]) {
         for (buf, p) in z.chunks_exact_mut(Poly::PACKED_13BIT).zip(self.v.iter()) {
-            p.pack_eta_2powdm1(buf.try_into().unwrap());
+            p.bitpack_2pow17(buf.try_into().unwrap());
         }
     }
 
@@ -1049,6 +1076,44 @@ impl<const K: usize> PolyVec<K> {
         }
     }
 
+    fn multiply_poly_ntt(&mut self, p: &Poly, v: &PolyVec<K>) {
+        for i in 0..K {
+            self.v[i].multiply_ntt(p, &v.v[i]);
+        }
+    }
+
+    fn hint_bitpack<const OMEGA: usize>(&self, dst: &mut [u8]) {
+        let mut idx = 0;
+
+        for i in 0..K {
+            for j in 0..N {
+                let h = self.v[i].f[j] as usize;
+                dst[idx] = (j & h.wrapping_neg()) as u8;
+                idx += h;
+            }
+
+            dst[OMEGA + i] = idx as u8;
+        }
+    }
+
+    fn bitpack_2pow17(&self, dst: &mut [u8]) {
+        for (buf, p) in dst
+            .chunks_exact_mut(Poly::packed_bytesize(18))
+            .zip(self.v.iter())
+        {
+            p.bitpack_2pow17(buf.try_into().unwrap());
+        }
+    }
+
+    fn bitpack_2pow19(&self, dst: &mut [u8]) {
+        for (buf, p) in dst
+            .chunks_exact_mut(Poly::packed_bytesize(20))
+            .zip(self.v.iter())
+        {
+            p.bitpack_2pow19(buf.try_into().unwrap());
+        }
+    }
+
     fn expand_mask_gamma2pow17(&mut self, rho: &[u8; 64], mu: usize, h: &mut hash::Shake256) {
         let mut rho_prime = [0u8; Poly::packed_bytesize(18)];
 
@@ -1068,12 +1133,47 @@ impl<const K: usize> PolyVec<K> {
             p.unpack_gamma_2pow19(&rho_prime);
         }
     }
+
+    fn norm_in_bound<const B: i32>(&self) -> bool {
+        self.v.iter().all(Poly::norm_in_bound::<B>)
+    }
+
+    fn make_hint<const G2: i32>(&mut self, x0: &PolyVec<4>, x1: &PolyVec<4>) -> usize {
+        let mut sum = 0;
+        for i in 0..K {
+            sum += self.v[i].make_hint::<G2>(&x0.v[i], &x1.v[i]);
+        }
+
+        sum
+    }
 }
 
-impl<const K: usize> AddAssign<&PolyVec<K>> for PolyVec<K> {
-    fn add_assign(&mut self, rhs: &PolyVec<K>) {
-        for (f, g) in self.v.iter_mut().zip(rhs.v.iter()) {
-            f.add_assign(g);
+impl<const K: usize> Mul<&Poly> for &PolyVec<K> {
+    type Output = PolyVec<K>;
+
+    fn mul(self, rhs: &Poly) -> Self::Output {
+        let mut v = PolyVec::zero();
+
+        for i in 0..K {
+            v.v[i].multiply_ntt(&self.v[i], rhs);
+        }
+
+        v
+    }
+}
+
+impl<const K: usize> AddAssign<&Self> for PolyVec<K> {
+    fn add_assign(&mut self, rhs: &Self) {
+        for i in 0..K {
+            self.v[i] += &rhs.v[i];
+        }
+    }
+}
+
+impl<const K: usize> SubAssign<&Self> for PolyVec<K> {
+    fn sub_assign(&mut self, rhs: &Self) {
+        for i in 0..K {
+            self.v[i] -= &rhs.v[i];
         }
     }
 }
@@ -1107,7 +1207,7 @@ mod tests {
         test_data_path.push("tests/mldsa-keygen.json");
 
         let test_data = read_to_string(&test_data_path).unwrap();
-        let test_data: Tests = serde_json::from_str(&test_data).unwrap();
+        let test_data: Tests<KeyGenTg> = serde_json::from_str(&test_data).unwrap();
 
         for tg in test_data.test_groups.iter() {
             match tg.parameter_set.as_str() {
@@ -1179,6 +1279,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_siggen() {
+        let mut test_data_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        test_data_path.push("tests/mldsa-sign.json");
+
+        let test_data = read_to_string(&test_data_path).unwrap();
+        let test_data: Tests<SigGenTg> = serde_json::from_str(&test_data).unwrap();
+
+        for tg in test_data.test_groups.iter() {
+            match tg.parameter_set.as_str() {
+                "ML-DSA-44" => {
+                    let mut sig = [0u8; 4096];
+
+                    for test in tg.tests.iter().take(1) {
+                        let sk = mldsa44::SigningKey::decode(&test.sk);
+                        let rnd = [0; 32];
+                        sk.sign_internal(&mut sig, &test.message, &rnd);
+                        assert_eq!(&sig, &test.signature[..]);
+                    }
+                }
+                "ML-DSA-65" => {
+                    continue;
+                }
+                "ML-DSA-87" => {
+                    continue;
+                }
+                _ => panic!("invalid paramter set"),
+            };
+        }
+    }
+
     #[derive(Deserialize)]
     struct KeyGenTV {
         #[serde(with = "hex")]
@@ -1198,8 +1329,29 @@ mod tests {
         tests: Vec<KeyGenTV>,
     }
     #[derive(Deserialize)]
-    struct Tests {
+    struct Tests<T> {
         #[serde(rename = "testGroups")]
-        test_groups: Vec<KeyGenTg>,
+        test_groups: Vec<T>,
+    }
+
+    #[derive(Deserialize)]
+    struct SigGenTV {
+        #[serde(with = "hex")]
+        message: Vec<u8>,
+
+        #[serde(with = "hex")]
+        signature: Vec<u8>,
+
+        #[serde(with = "hex")]
+        sk: Vec<u8>,
+    }
+    #[derive(Deserialize)]
+    struct SigGenTg {
+        deterministic: bool,
+
+        #[serde(rename = "parameterSet")]
+        parameter_set: String,
+
+        tests: Vec<SigGenTV>,
     }
 }
