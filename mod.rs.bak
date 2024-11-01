@@ -83,7 +83,6 @@ struct SignTmp<const K: usize, const L: usize, const W1_BZ: usize, const CT: usi
 
 pub mod mldsa44 {
     use core::mem::MaybeUninit;
-    use std::mem;
 
     use crate::ml_dsa::hash;
 
@@ -105,12 +104,12 @@ pub mod mldsa44 {
     pub type SigningKey = super::SigningKey<K, L, ETA>;
     pub type VerifyingKey = super::VerifyingKey<K>;
 
-    type SignTmp =
-        super::SignTmp<K, L, { K * Poly::packed_bytesize(6) }, { c_tilde_size::<LAMBDA>() }>;
+    type SignTmp = super::SignTmp<K, L, { w1_size::<GAMMA2>() }, { c_tilde_size::<LAMBDA>() }>;
 
     impl SigningKey {
         pub(super) fn sign_internal(&self, dst: &mut [u8], m: &[u8], rnd: &[u8; 32]) {
-            let mut tmp: SignTmp = unsafe { mem::zeroed() };
+            let mut uninit_tmp: MaybeUninit<SignTmp> = MaybeUninit::uninit();
+            let tmp = unsafe { uninit_tmp.assume_init_mut() };
 
             let (c_tilde, dst): (&mut [u8; LAMBDA / 4], _) = dst.split_first_chunk_mut().unwrap();
 
@@ -120,7 +119,7 @@ pub mod mldsa44 {
 
             h.absorb_and_squeeze(&mut tmp.rho_prime2, &[&self.k, rnd, &tmp.mu]);
 
-            for nonce in 0..814 {
+            for nonce in 0..1 {
                 tmp.y
                     .expand_mask_gamma2pow17(&tmp.rho_prime2, nonce, &mut h);
 
@@ -129,15 +128,12 @@ pub mod mldsa44 {
                 tmp.w.multiply_matvec_ntt(&self.a_hat, &tmp.y_hat);
                 tmp.w.reduce_invntt_tomont_inplace();
 
-                tmp.w.decompose_88(&mut tmp.w0, &mut tmp.w1);
+                tmp.w.decompose_88(&mut tmp.w1, &mut tmp.w0);
                 tmp.w1.pack_simple_6bit(&mut tmp.w1_bytes);
 
                 h.absorb_and_squeeze(c_tilde, &[&tmp.mu, &tmp.w1_bytes]);
-
                 h.absorb(c_tilde);
-                h.finalize();
                 let mut c_hat = Poly::sample_in_ball::<TAU>(&mut h);
-                h.reset();
                 c_hat.ntt_inplace();
 
                 tmp.z.multiply_poly_ntt(&c_hat, &self.s1_hat);
@@ -160,7 +156,6 @@ pub mod mldsa44 {
 
                 tmp.h.multiply_poly_ntt(&c_hat, &self.t0_hat);
                 tmp.h.invntt_tomont_inplace();
-                tmp.h.reduce();
 
                 if !tmp.h.norm_in_bound::<{ GAMMA2 as i32 }>() {
                     continue;
@@ -168,23 +163,17 @@ pub mod mldsa44 {
 
                 tmp.w0 += &tmp.h;
 
-                let count = tmp.h.make_hint::<{ GAMMA2 as i32 }>(&tmp.w0, &tmp.w1);
-                dbg!(count);
-
-                if count > OMEGA {
+                if tmp.h.make_hint::<{ GAMMA2 as i32 }>(&tmp.w0, &tmp.w1) > OMEGA {
                     continue;
                 }
-
-                assert_eq!(c_tilde[0], 140);
-                assert_eq!(nonce, 4);
 
                 break;
             }
 
-            // tmp.z.bitpack_2pow17(dst);
+            tmp.z.bitpack_2pow17(dst);
 
-            // tmp.h
-            //     .hint_bitpack::<OMEGA>(&mut dst[PolyVec::<K>::packed_bytesize(18)..]);
+            tmp.h
+                .hint_bitpack::<OMEGA>(&mut dst[PolyVec::<K>::packed_bytesize(18)..]);
 
             for i in 0..L {
                 // tmp.z.v[i].pack
@@ -644,10 +633,10 @@ impl Poly {
 
         let mut iter = block[8..].iter();
 
-        let mut i = N - TAU;
+        let mut idx = N - TAU;
 
-        while i < N {
-            let j = if let Some(j) = iter.by_ref().find(|b| (**b as usize) <= i) {
+        while idx < N {
+            let j = if let Some(j) = iter.by_ref().find(|b| (**b as usize) <= idx) {
                 *j as usize
             } else {
                 block = h.squeezeblock();
@@ -655,11 +644,11 @@ impl Poly {
                 continue;
             };
 
-            poly.f[i] = poly.f[j];
-            poly.f[j] = 1 - ((hash & 1) << 1) as i32;
+            poly.f[idx] = poly.f[j];
+            poly.f[j] = 1 - ((hash as usize & 1) << 1) as i32;
 
             hash >>= 1;
-            i += 1;
+            idx += 1;
         }
 
         h.reset();
@@ -708,11 +697,11 @@ impl Poly {
         }
     }
 
-    fn decompose_88(&self, p0: &mut Self, p1: &mut Self) {
+    fn decompose_88(&self, f: &mut Self, g: &mut Self) {
         for i in 0..N {
             let (r1, r0) = coeff::decompose_88(self.f[i]);
-            p0.f[i] = r0;
-            p1.f[i] = r1;
+            f.f[i] = r1;
+            g.f[i] = r0;
         }
     }
 
@@ -796,7 +785,7 @@ impl Poly {
 
     const PACKED_13BIT: usize = (N * 13) / 8;
 
-    fn pack_eta_2powdm1(&self, z: &mut [u8; Self::PACKED_13BIT]) {
+    fn bitpack_2pow17(&self, z: &mut [u8; Self::packed_bytesize(18)]) {
         const ETA: i32 = 1 << (D - 1);
 
         for (b, a) in z.chunks_exact_mut(13).zip(self.f.chunks_exact(8)) {
@@ -839,20 +828,17 @@ impl Poly {
         const B: i32 = 1 << 17;
 
         for (b, a) in z.chunks_exact_mut(9).zip(self.f.chunks_exact(4)) {
-            let a0 = B - a[0];
-            let a1 = B - a[1];
-            let a2 = B - a[2];
-            let a3 = B - a[3];
+            let a: [i32; 4] = array::from_fn(|i| B - a[i]);
 
-            b[0] = (a0 >> 0) as u8;
-            b[1] = (a0 >> 8) as u8;
-            b[2] = ((a0 >> 16) | (a1 << 2)) as u8;
-            b[3] = (a1 >> 6) as u8;
-            b[4] = ((a1 >> 14) | (a2 << 4)) as u8;
-            b[5] = (a2 >> 4) as u8;
-            b[6] = ((a2 >> 12) | (a3 << 6)) as u8;
-            b[7] = (a3 >> 2) as u8;
-            b[8] = (a3 >> 10) as u8;
+            b[0] = (a[0] >> 0) as u8;
+            b[1] = (a[0] >> 8) as u8;
+            b[2] = ((a[0] >> 16) | (a[1] << 2)) as u8;
+            b[3] = (a[1] >> 6) as u8;
+            b[4] = ((a[1] >> 14) | (a[2] << 4)) as u8;
+            b[5] = (a[2] >> 4) as u8;
+            b[6] = ((a[2] >> 12) | (a[3] << 6)) as u8;
+            b[7] = (a[3] >> 2) as u8;
+            b[8] = (a[3] >> 10) as u8;
         }
     }
 
@@ -901,11 +887,10 @@ impl Poly {
         self.f.iter().all(|w| coeff::norm(*w) < B)
     }
 
-    fn make_hint<const G2: i32>(&mut self, p0: &Poly, p1: &Poly) -> usize {
+    fn make_hint<const G2: i32>(&mut self, f: &Poly, g: &Poly) -> usize {
         let mut sum = 0;
-
         for i in 0..N {
-            let h = coeff::make_hint::<G2>(p0.f[i], p1.f[i]);
+            let h = coeff::make_hint::<G2>(f.f[i], g.f[i]);
 
             self.f[i] = h;
             sum += h as usize;
@@ -1015,9 +1000,15 @@ impl<const K: usize> PolyVec<K> {
         }
     }
 
-    fn decompose_88(&self, x0: &mut PolyVec<K>, x1: &mut PolyVec<K>) {
+    fn decompose_32(&self, x1: &mut PolyVec<K>, x0: &mut PolyVec<K>) {
         for i in 0..K {
-            self.v[i].decompose_88(&mut x0.v[i], &mut x1.v[i]);
+            self.v[i].decompose_32(&mut x1.v[i], &mut x0.v[i]);
+        }
+    }
+
+    fn decompose_88(&self, x1: &mut PolyVec<K>, x0: &mut PolyVec<K>) {
+        for i in 0..K {
+            self.v[i].decompose_88(&mut x1.v[i], &mut x0.v[i]);
         }
     }
 
@@ -1047,7 +1038,7 @@ impl<const K: usize> PolyVec<K> {
 
     fn pack_eta_2powdm1(&self, z: &mut [u8]) {
         for (buf, p) in z.chunks_exact_mut(Poly::PACKED_13BIT).zip(self.v.iter()) {
-            p.pack_eta_2powdm1(buf.try_into().unwrap());
+            p.bitpack_2pow17(buf.try_into().unwrap());
         }
     }
 
@@ -1093,7 +1084,6 @@ impl<const K: usize> PolyVec<K> {
         for i in 0..K {
             for j in 0..N {
                 let h = self.v[i].f[j] as usize;
-
                 dst[idx] = (j & h.wrapping_neg()) as u8;
                 idx += h;
             }
@@ -1107,7 +1097,7 @@ impl<const K: usize> PolyVec<K> {
             .chunks_exact_mut(Poly::packed_bytesize(18))
             .zip(self.v.iter())
         {
-            p.pack_gamma_2pow17(buf.try_into().unwrap());
+            p.bitpack_2pow17(buf.try_into().unwrap());
         }
     }
 
