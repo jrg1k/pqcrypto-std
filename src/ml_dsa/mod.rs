@@ -335,6 +335,10 @@ impl Poly {
         Self { f: [0; N] }
     }
 
+    const fn packed_bytesize(bitlen: usize) -> usize {
+        (N * bitlen) / 8
+    }
+
     /// NTT(w)
     fn ntt_inplace(&mut self) {
         let w = &mut self.f;
@@ -750,6 +754,10 @@ impl<const K: usize> PolyVec<K> {
         Self {
             v: [const { Poly::zero() }; K],
         }
+    }
+
+    const fn packed_bytesize(coeff_bitlen: usize) -> usize {
+        K * Poly::packed_bytesize(coeff_bitlen)
     }
 
     fn ntt_inplace(&mut self) {
