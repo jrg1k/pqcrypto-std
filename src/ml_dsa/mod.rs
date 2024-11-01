@@ -689,56 +689,6 @@ impl AddAssign<&Poly> for Poly {
     }
 }
 
-/// Decomposes r into (r1, r0) such that r = r1*2^d + r0 (mod Q)
-const fn power2round(mut r: i32) -> (i32, i32) {
-    r += (r >> 31) & Q;
-
-    let q = (1 << (D - 1)) - 1;
-
-    let r1 = (r + q) >> D;
-    let r0 = r - (r1 << D);
-
-    (r1, r0)
-}
-
-/// Convert 3 bytes into an element of Z_Q.
-const fn coeff_from_bytes(b0: u8, b1: u8, b2: u8) -> i32 {
-    let mut z = b0 as u32;
-    z |= (b1 as u32) << 8;
-    z |= (b2 as u32) << 16;
-    z &= 0x7FFFFF;
-
-    if z < Q as u32 {
-        return z as i32;
-    }
-
-    0
-}
-
-const fn mod5(a: u32) -> i32 {
-    const DIV_SHIFT: usize = 10;
-    const M: u32 = ((1 << DIV_SHIFT) + 3) / 5;
-    (a - ((a * M) >> DIV_SHIFT) * 5) as i32
-}
-
-/// Convert two half-bytes into two elements of Z_Q.
-const fn coeffs_from_halfbytes<const ETA: usize>(b: u8) -> (Option<i32>, Option<i32>) {
-    let b0 = (b & 0xF) as u32;
-    let b1 = (b >> 4) as u32;
-
-    match ETA {
-        2 => (
-            if b0 < 15 { Some(2 - mod5(b0)) } else { None },
-            if b1 < 15 { Some(2 - mod5(b1)) } else { None },
-        ),
-        4 => (
-            if b0 < 9 { Some(4 - b0 as i32) } else { None },
-            if b1 < 9 { Some(4 - b1 as i32) } else { None },
-        ),
-        _ => unreachable!(),
-    }
-}
-
 struct PolyMat<const K: usize, const L: usize> {
     m: [PolyVec<L>; K],
 }
