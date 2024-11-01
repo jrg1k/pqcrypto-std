@@ -4,6 +4,7 @@ use rand_core::CryptoRngCore;
 use sha3::digest::XofReader;
 use zeroize::Zeroize;
 
+mod coeff;
 mod hash;
 mod reduce;
 
@@ -535,7 +536,7 @@ impl Poly {
 
     fn power2round(&self, f: &mut Self, g: &mut Self) {
         for i in 0..N {
-            let (r1, r0) = power2round(self.f[i]);
+            let (r1, r0) = coeff::power2round(self.f[i]);
             f.f[i] = r1;
             g.f[i] = r0;
         }
