@@ -584,6 +584,20 @@ impl Poly {
         }
     }
 
+    fn pack_simple_4bit(&self, z: &mut [u8; Self::packed_bytesize(4)]) {
+        for (b, a) in z.iter_mut().zip(self.f.chunks_exact(2)) {
+            *b = (a[0] | a[1] << 4) as u8;
+        }
+    }
+
+    fn pack_simple_6bit(&self, z: &mut [u8; Self::packed_bytesize(6)]) {
+        for (b, a) in z.chunks_exact_mut(3).zip(self.f.chunks_exact(4)) {
+            b[0] = ((a[0] >> 0) | (a[1] << 6)) as u8;
+            b[1] = ((a[1] >> 2) | (a[2] << 4)) as u8;
+            b[2] = ((a[2] >> 4) | (a[3] << 2)) as u8;
+        }
+    }
+
     const PACKED_4BIT: usize = (N * 4) / 8;
 
     fn pack_eta4(&self, z: &mut [u8; Self::PACKED_4BIT]) {
@@ -842,6 +856,24 @@ impl<const K: usize> PolyVec<K> {
     fn unpack_eta_2powdm1(&mut self, z: &[u8]) {
         for (p, buf) in self.v.iter_mut().zip(z.chunks_exact(Poly::PACKED_13BIT)) {
             p.unpack_eta_2powdm1(buf.try_into().unwrap());
+        }
+    }
+
+    fn pack_simple_4bit<const BZ: usize>(&self, z: &mut [u8; BZ]) {
+        for (chunk, p) in z
+            .chunks_exact_mut(Poly::packed_bytesize(4))
+            .zip(self.v.iter())
+        {
+            p.pack_simple_4bit(chunk.try_into().unwrap());
+        }
+    }
+
+    fn pack_simple_6bit<const BZ: usize>(&self, z: &mut [u8; BZ]) {
+        for (chunk, p) in z
+            .chunks_exact_mut(Poly::packed_bytesize(6))
+            .zip(self.v.iter())
+        {
+            p.pack_simple_6bit(chunk.try_into().unwrap());
         }
     }
 
