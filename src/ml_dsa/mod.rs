@@ -330,6 +330,10 @@ impl Drop for Poly {
 }
 
 impl Poly {
+    const fn zero() -> Self {
+        Self { f: [0; N] }
+    }
+
     /// NTT(w)
     fn ntt_inplace(&mut self) {
         let w = &mut self.f;
@@ -725,6 +729,12 @@ struct PolyVec<const K: usize> {
 }
 
 impl<const K: usize> PolyVec<K> {
+    const fn zero() -> Self {
+        Self {
+            v: [const { Poly::zero() }; K],
+        }
+    }
+
     fn ntt_inplace(&mut self) {
         for p in self.v.iter_mut() {
             p.ntt_inplace();
