@@ -542,6 +542,22 @@ impl Poly {
         }
     }
 
+    fn decompose_32(&self, f: &mut Self, g: &mut Self) {
+        for i in 0..N {
+            let (r1, r0) = coeff::decompose_32(self.f[i]);
+            f.f[i] = r1;
+            g.f[i] = r0;
+        }
+    }
+
+    fn decompose_88(&self, f: &mut Self, g: &mut Self) {
+        for i in 0..N {
+            let (r1, r0) = coeff::decompose_88(self.f[i]);
+            f.f[i] = r1;
+            g.f[i] = r0;
+        }
+    }
+
     const PACKED_10BIT: usize = (N * 10) / 8;
 
     fn pack_simple_10bit(&self, z: &mut [u8; Self::PACKED_10BIT]) {
@@ -770,6 +786,18 @@ impl<const K: usize> PolyVec<K> {
     fn power2round(&self, t1: &mut PolyVec<K>, t0: &mut PolyVec<K>) {
         for i in 0..K {
             self.v[i].power2round(&mut t1.v[i], &mut t0.v[i]);
+        }
+    }
+
+    fn decompose_32(&self, x1: &mut PolyVec<K>, x0: &mut PolyVec<K>) {
+        for i in 0..K {
+            self.v[i].decompose_32(&mut x1.v[i], &mut x0.v[i]);
+        }
+    }
+
+    fn decompose_88(&self, x1: &mut PolyVec<K>, x0: &mut PolyVec<K>) {
+        for i in 0..K {
+            self.v[i].decompose_88(&mut x1.v[i], &mut x0.v[i]);
         }
     }
 
