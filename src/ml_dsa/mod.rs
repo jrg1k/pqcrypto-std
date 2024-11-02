@@ -413,33 +413,6 @@ impl Poly {
     }
 
     /// NTT^-1 (w_hat)
-    fn invntt_inplace(&mut self) {
-        let w = &mut self.f;
-
-        let mut m = 255;
-
-        for len in (0..8).map(|n| 1 << n) {
-            for start in (0..256).step_by(len << 1) {
-                let zeta = -ZETAS[m];
-                m -= 1;
-                for j in start..start + len {
-                    let t = w[j];
-                    w[j] = t + w[j + len];
-                    w[j + len] = t - w[j + len];
-                    w[j + len] = reduce::mont_mul(zeta, w[j + len]);
-                }
-            }
-        }
-
-        // 2^32 / 256 = 2^{24}
-        const DIV_256: i32 = ((1 << 24) % Q as i64) as i32;
-
-        for a in w.iter_mut() {
-            *a = reduce::mont_mul(*a, DIV_256);
-        }
-    }
-
-    /// NTT^-1 (w_hat)
     fn invntt_tomont_inplace(&mut self) {
         let w = &mut self.f;
 
@@ -844,10 +817,6 @@ impl<const K: usize> PolyVec<K> {
         Self {
             v: [const { Poly::zero() }; K],
         }
-    }
-
-    const fn packed_bytesize(coeff_bitlen: usize) -> usize {
-        K * Poly::packed_bytesize(coeff_bitlen)
     }
 
     fn ntt_inplace(&mut self) {
