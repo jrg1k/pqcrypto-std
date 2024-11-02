@@ -70,7 +70,7 @@ const fn sig_size(k: usize, l: usize, lambda: usize, gamma1: usize, omega: usize
 pub mod mldsa44 {
     use rand_core::CryptoRngCore;
 
-    use crate::ml_dsa::hash;
+    use crate::mldsa::hash;
 
     use super::{sig_size, sk_size, vk_size, Poly, PolyVec, Q};
 

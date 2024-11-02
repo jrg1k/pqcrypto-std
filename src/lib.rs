@@ -2,4 +2,4 @@
 #![allow(clippy::identity_op)]
 
 pub mod kyber;
-pub mod ml_dsa;
+pub mod mldsa;
