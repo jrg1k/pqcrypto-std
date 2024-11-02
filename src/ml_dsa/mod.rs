@@ -783,6 +783,19 @@ impl Poly {
 
         true
     }
+
+    fn make_hint<const G2: i32>(&mut self, p0: &Poly, p1: &Poly) -> usize {
+        let mut sum = 0;
+
+        for i in 0..N {
+            let h = coeff::make_hint::<G2>(p0.f[i], p1.f[i]);
+
+            self.f[i] = h;
+            sum += h as usize;
+        }
+
+        sum
+    }
 }
 
 impl AddAssign<&Poly> for Poly {
@@ -1002,6 +1015,15 @@ impl<const K: usize> PolyVec<K> {
         }
 
         true
+    }
+
+    fn make_hint<const G2: i32>(&mut self, x0: &PolyVec<K>, x1: &PolyVec<K>) -> usize {
+        let mut sum = 0;
+        for i in 0..K {
+            sum += self.v[i].make_hint::<G2>(&x0.v[i], &x1.v[i]);
+        }
+
+        sum
     }
 }
 
