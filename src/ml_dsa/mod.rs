@@ -1,4 +1,8 @@
-use core::{array, mem::MaybeUninit, ops::AddAssign};
+use core::{
+    array,
+    mem::MaybeUninit,
+    ops::{AddAssign, Mul, SubAssign},
+};
 
 use rand_core::CryptoRngCore;
 use zeroize::Zeroize;
@@ -56,46 +60,334 @@ const fn sk_size(k: usize, l: usize, eta: usize) -> usize {
     }
 }
 
+const fn bitsize(n: usize) -> usize {
+    n.ilog2() as usize + 1
+}
+
+const fn sig_size(k: usize, l: usize, lambda: usize, gamma1: usize, omega: usize) -> usize {
+    lambda / 4 + l * 32 * (1 + bitsize(gamma1 - 1)) + omega + k
+}
+
+struct SignTmp<const K: usize, const L: usize> {
+    y: PolyVec<L>,
+    y_hat: PolyVec<L>,
+    w: PolyVec<K>,
+    w1: PolyVec<K>,
+    w0: PolyVec<K>,
+    z: PolyVec<L>,
+    h: PolyVec<K>,
+    c_hat: Poly,
+}
+
 pub mod mldsa44 {
-    use super::{sk_size, vk_size};
+    use core::mem::MaybeUninit;
+
+    use crate::ml_dsa::hash;
+
+    use super::{sig_size, sk_size, vk_size, Poly, Q};
 
     const K: usize = 4;
     const L: usize = 4;
     const ETA: usize = 2;
+    const GAMMA1: usize = 1 << 17;
+    const GAMMA2: usize = (Q as usize - 1) / 88;
+    const LAMBDA: usize = 128;
+    const TAU: usize = 39;
+    const BETA: usize = TAU * ETA;
+    const OMEGA: usize = 80;
 
     pub const VK_SIZE: usize = vk_size(K);
     pub const SK_SIZE: usize = sk_size(K, L, ETA);
+    pub const SIG_SIZE: usize = sig_size(K, L, LAMBDA, GAMMA1, OMEGA);
 
     pub type SigningKey = super::SigningKey<K, L, ETA>;
     pub type VerifyingKey = super::VerifyingKey<K>;
+
+    type SignTmp = super::SignTmp<K, L>;
+
+    impl SigningKey {
+        pub fn sign_internal(&self, dst: &mut [u8; SIG_SIZE], m: &[u8], rnd: &[u8; 32]) {
+            let mut uninit_tmp: MaybeUninit<SignTmp> = MaybeUninit::uninit();
+            let tmp = unsafe { uninit_tmp.assume_init_mut() };
+
+            let (c_tilde, buf): (&mut [u8; LAMBDA / 4], _) = dst.split_first_chunk_mut().unwrap();
+            let (w1_bytes, buf): (&mut [u8; K * Poly::packed_bytesize(6)], _) =
+                buf.split_first_chunk_mut().unwrap();
+            let (mu, buf): (&mut [u8; 64], _) = buf.split_first_chunk_mut().unwrap();
+            let (rho_prime2, _): (&mut [u8; 64], _) = buf.split_first_chunk_mut().unwrap();
+
+            let mut h = hash::Shake256::init();
+
+            h.absorb_and_squeeze(mu, &[&self.tr, m]);
+
+            h.absorb_and_squeeze(rho_prime2, &[&self.k, rnd, mu]);
+
+            for nonce in (0..).step_by(L) {
+                tmp.y.expand_mask_2pow17(rho_prime2, nonce, &mut h);
+
+                tmp.y_hat.ntt(&tmp.y);
+
+                tmp.w.multiply_matvec_ntt(&self.a_hat, &tmp.y_hat);
+                tmp.w.reduce_invntt_tomont_inplace();
+
+                tmp.w.decompose_88(&mut tmp.w0, &mut tmp.w1);
+                tmp.w1.pack_simple_6bit(w1_bytes);
+                h.absorb_and_squeeze(c_tilde, &[mu, w1_bytes]);
+
+                h.absorb(c_tilde);
+                h.finalize();
+                tmp.c_hat.sample_in_ball::<TAU>(&mut h);
+                tmp.c_hat.ntt_inplace();
+
+                tmp.z.multiply_poly_ntt(&tmp.c_hat, &self.s1_hat);
+                tmp.z.invntt_tomont_inplace();
+                tmp.z += &tmp.y;
+                tmp.z.reduce();
+
+                if !tmp.z.norm_in_bound(GAMMA1 - BETA) {
+                    continue;
+                }
+
+                tmp.h.multiply_poly_ntt(&tmp.c_hat, &self.s2_hat);
+                tmp.h.invntt_tomont_inplace();
+                tmp.w0 -= &tmp.h;
+                tmp.w0.reduce();
+
+                if !tmp.w0.norm_in_bound(GAMMA2 - BETA) {
+                    continue;
+                }
+
+                tmp.h.multiply_poly_ntt(&tmp.c_hat, &self.t0_hat);
+                tmp.h.invntt_tomont_inplace();
+                tmp.h.reduce();
+
+                if !tmp.h.norm_in_bound(GAMMA2) {
+                    continue;
+                }
+
+                tmp.w0 += &tmp.h;
+
+                let count = tmp.h.make_hint::<{ GAMMA2 as i32 }>(&tmp.w0, &tmp.w1);
+
+                if count > OMEGA {
+                    continue;
+                }
+
+                break;
+            }
+
+            tmp.z.bitpack_2pow17(&mut dst[LAMBDA / 4..]);
+
+            tmp.h
+                .hint_bitpack::<OMEGA>(&mut dst[LAMBDA / 4 + L * Poly::packed_bytesize(18)..]);
+        }
+    }
 }
 
 pub mod mldsa65 {
-    use super::{sk_size, vk_size};
+    use core::mem::MaybeUninit;
+
+    use super::{hash, sig_size, sk_size, vk_size, Poly, Q};
 
     const K: usize = 6;
     const L: usize = 5;
     const ETA: usize = 4;
+    const GAMMA1: usize = 1 << 19;
+    const GAMMA2: usize = (Q as usize - 1) / 32;
+    const LAMBDA: usize = 192;
+    const TAU: usize = 49;
+    const BETA: usize = TAU * ETA;
+    const OMEGA: usize = 55;
 
     pub const VK_SIZE: usize = vk_size(K);
     pub const SK_SIZE: usize = sk_size(K, L, ETA);
+    pub const SIG_SIZE: usize = sig_size(K, L, LAMBDA, GAMMA1, OMEGA);
 
     pub type SigningKey = super::SigningKey<K, L, ETA>;
     pub type VerifyingKey = super::VerifyingKey<K>;
+
+    type SignTmp = super::SignTmp<K, L>;
+
+    impl SigningKey {
+        pub fn sign_internal(&self, dst: &mut [u8; SIG_SIZE], m: &[u8], rnd: &[u8; 32]) {
+            let mut uninit_tmp: MaybeUninit<SignTmp> = MaybeUninit::uninit();
+            let tmp = unsafe { uninit_tmp.assume_init_mut() };
+
+            let (c_tilde, buf): (&mut [u8; LAMBDA / 4], _) = dst.split_first_chunk_mut().unwrap();
+            let (w1_bytes, buf): (&mut [u8; K * Poly::packed_bytesize(4)], _) =
+                buf.split_first_chunk_mut().unwrap();
+            let (mu, buf): (&mut [u8; 64], _) = buf.split_first_chunk_mut().unwrap();
+            let (rho_prime2, _): (&mut [u8; 64], _) = buf.split_first_chunk_mut().unwrap();
+
+            let mut h = hash::Shake256::init();
+
+            h.absorb_and_squeeze(mu, &[&self.tr, m]);
+
+            h.absorb_and_squeeze(rho_prime2, &[&self.k, rnd, mu]);
+
+            for nonce in (0..).step_by(L) {
+                tmp.y.expand_mask_2pow19(rho_prime2, nonce, &mut h);
+
+                tmp.y_hat.ntt(&tmp.y);
+
+                tmp.w.multiply_matvec_ntt(&self.a_hat, &tmp.y_hat);
+                tmp.w.reduce_invntt_tomont_inplace();
+
+                tmp.w.decompose_32(&mut tmp.w0, &mut tmp.w1);
+                tmp.w1.pack_simple_4bit(w1_bytes);
+                h.absorb_and_squeeze(c_tilde, &[mu, w1_bytes]);
+
+                h.absorb(c_tilde);
+                h.finalize();
+                tmp.c_hat.sample_in_ball::<TAU>(&mut h);
+                tmp.c_hat.ntt_inplace();
+
+                tmp.z.multiply_poly_ntt(&tmp.c_hat, &self.s1_hat);
+                tmp.z.invntt_tomont_inplace();
+                tmp.z += &tmp.y;
+                tmp.z.reduce();
+
+                if !tmp.z.norm_in_bound(GAMMA1 - BETA) {
+                    continue;
+                }
+
+                tmp.h.multiply_poly_ntt(&tmp.c_hat, &self.s2_hat);
+                tmp.h.invntt_tomont_inplace();
+                tmp.w0 -= &tmp.h;
+                tmp.w0.reduce();
+
+                if !tmp.w0.norm_in_bound(GAMMA2 - BETA) {
+                    continue;
+                }
+
+                tmp.h.multiply_poly_ntt(&tmp.c_hat, &self.t0_hat);
+                tmp.h.invntt_tomont_inplace();
+                tmp.h.reduce();
+
+                if !tmp.h.norm_in_bound(GAMMA2) {
+                    continue;
+                }
+
+                tmp.w0 += &tmp.h;
+
+                let count = tmp.h.make_hint::<{ GAMMA2 as i32 }>(&tmp.w0, &tmp.w1);
+
+                if count > OMEGA {
+                    continue;
+                }
+
+                break;
+            }
+
+            tmp.z.bitpack_2pow19(&mut dst[LAMBDA / 4..]);
+
+            tmp.h
+                .hint_bitpack::<OMEGA>(&mut dst[LAMBDA / 4 + L * Poly::packed_bytesize(20)..]);
+        }
+    }
 }
 
 pub mod mldsa87 {
-    use super::{sk_size, vk_size};
+    use core::mem::MaybeUninit;
+
+    use super::{hash, sig_size, sk_size, vk_size, Poly, Q};
 
     const K: usize = 8;
     const L: usize = 7;
     const ETA: usize = 2;
+    const GAMMA1: usize = 1 << 19;
+    const GAMMA2: usize = (Q as usize - 1) / 32;
+    const LAMBDA: usize = 256;
+    const TAU: usize = 60;
+    const BETA: usize = TAU * ETA;
+    const OMEGA: usize = 75;
 
     pub const VK_SIZE: usize = vk_size(K);
     pub const SK_SIZE: usize = sk_size(K, L, ETA);
+    pub const SIG_SIZE: usize = sig_size(K, L, LAMBDA, GAMMA1, OMEGA);
 
     pub type SigningKey = super::SigningKey<K, L, ETA>;
     pub type VerifyingKey = super::VerifyingKey<K>;
+
+    type SignTmp = super::SignTmp<K, L>;
+
+    impl SigningKey {
+        pub fn sign_internal(&self, dst: &mut [u8; SIG_SIZE], m: &[u8], rnd: &[u8; 32]) {
+            let mut uninit_tmp: MaybeUninit<SignTmp> = MaybeUninit::uninit();
+            let tmp = unsafe { uninit_tmp.assume_init_mut() };
+
+            let (c_tilde, buf): (&mut [u8; LAMBDA / 4], _) = dst.split_first_chunk_mut().unwrap();
+            let (w1_bytes, buf): (&mut [u8; K * Poly::packed_bytesize(4)], _) =
+                buf.split_first_chunk_mut().unwrap();
+            let (mu, buf): (&mut [u8; 64], _) = buf.split_first_chunk_mut().unwrap();
+            let (rho_prime2, _): (&mut [u8; 64], _) = buf.split_first_chunk_mut().unwrap();
+
+            let mut h = hash::Shake256::init();
+
+            h.absorb_and_squeeze(mu, &[&self.tr, m]);
+
+            h.absorb_and_squeeze(rho_prime2, &[&self.k, rnd, mu]);
+
+            for nonce in (0..).step_by(L) {
+                tmp.y.expand_mask_2pow19(rho_prime2, nonce, &mut h);
+
+                tmp.y_hat.ntt(&tmp.y);
+
+                tmp.w.multiply_matvec_ntt(&self.a_hat, &tmp.y_hat);
+                tmp.w.reduce_invntt_tomont_inplace();
+
+                tmp.w.decompose_32(&mut tmp.w0, &mut tmp.w1);
+                tmp.w1.pack_simple_4bit(w1_bytes);
+                h.absorb_and_squeeze(c_tilde, &[mu, w1_bytes]);
+
+                h.absorb(c_tilde);
+                h.finalize();
+                tmp.c_hat.sample_in_ball::<TAU>(&mut h);
+                tmp.c_hat.ntt_inplace();
+
+                tmp.z.multiply_poly_ntt(&tmp.c_hat, &self.s1_hat);
+                tmp.z.invntt_tomont_inplace();
+                tmp.z += &tmp.y;
+                tmp.z.reduce();
+
+                if !tmp.z.norm_in_bound(GAMMA1 - BETA) {
+                    continue;
+                }
+
+                tmp.h.multiply_poly_ntt(&tmp.c_hat, &self.s2_hat);
+                tmp.h.invntt_tomont_inplace();
+                tmp.w0 -= &tmp.h;
+                tmp.w0.reduce();
+
+                if !tmp.w0.norm_in_bound(GAMMA2 - BETA) {
+                    continue;
+                }
+
+                tmp.h.multiply_poly_ntt(&tmp.c_hat, &self.t0_hat);
+                tmp.h.invntt_tomont_inplace();
+                tmp.h.reduce();
+
+                if !tmp.h.norm_in_bound(GAMMA2) {
+                    continue;
+                }
+
+                tmp.w0 += &tmp.h;
+
+                let count = tmp.h.make_hint::<{ GAMMA2 as i32 }>(&tmp.w0, &tmp.w1);
+
+                if count > OMEGA {
+                    continue;
+                }
+
+                break;
+            }
+
+            tmp.z.bitpack_2pow19(&mut dst[LAMBDA / 4..]);
+
+            tmp.h
+                .hint_bitpack::<OMEGA>(&mut dst[LAMBDA / 4 + L * Poly::packed_bytesize(20)..]);
+        }
+    }
 }
 
 fn vk_encode<const K: usize>(dst: &mut [u8], rho: &[u8; 32], t1: &PolyVec<K>) {
