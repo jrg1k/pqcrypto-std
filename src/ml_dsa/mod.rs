@@ -798,10 +798,18 @@ impl Poly {
     }
 }
 
-impl AddAssign<&Poly> for Poly {
-    fn add_assign(&mut self, rhs: &Poly) {
-        for (a, b) in self.f.iter_mut().zip(rhs.f.iter()) {
-            *a += b;
+impl AddAssign<&Self> for Poly {
+    fn add_assign(&mut self, rhs: &Self) {
+        for i in 0..N {
+            self.f[i] += rhs.f[i];
+        }
+    }
+}
+
+impl SubAssign<&Self> for Poly {
+    fn sub_assign(&mut self, rhs: &Self) {
+        for i in 0..N {
+            self.f[i] -= rhs.f[i];
         }
     }
 }
@@ -860,15 +868,21 @@ impl<const K: usize> PolyVec<K> {
         }
     }
 
-    fn invntt_inplace(&mut self) {
+    fn reduce(&mut self) {
         for p in self.v.iter_mut() {
-            p.invntt_inplace();
+            p.reduce();
         }
     }
 
     fn reduce_invntt_tomont_inplace(&mut self) {
         for p in self.v.iter_mut() {
             p.reduce();
+            p.invntt_tomont_inplace();
+        }
+    }
+
+    fn invntt_tomont_inplace(&mut self) {
+        for p in self.v.iter_mut() {
             p.invntt_tomont_inplace();
         }
     }
@@ -950,6 +964,13 @@ impl<const K: usize> PolyVec<K> {
             self.v[i].dot_prod_ntt(&m.m[i], v)
         }
     }
+
+    fn multiply_poly_ntt(&mut self, p: &Poly, v: &PolyVec<K>) {
+        for i in 0..K {
+            self.v[i].multiply_ntt(p, &v.v[i]);
+        }
+    }
+
     fn hint_bitpack<const OMEGA: usize>(&self, dst: &mut [u8]) {
         let mut idx = 0;
 
@@ -1027,10 +1048,32 @@ impl<const K: usize> PolyVec<K> {
     }
 }
 
-impl<const K: usize> AddAssign<&PolyVec<K>> for PolyVec<K> {
-    fn add_assign(&mut self, rhs: &PolyVec<K>) {
-        for (f, g) in self.v.iter_mut().zip(rhs.v.iter()) {
-            f.add_assign(g);
+impl<const K: usize> Mul<&Poly> for &PolyVec<K> {
+    type Output = PolyVec<K>;
+
+    fn mul(self, rhs: &Poly) -> Self::Output {
+        let mut v = PolyVec::zero();
+
+        for i in 0..K {
+            v.v[i].multiply_ntt(&self.v[i], rhs);
+        }
+
+        v
+    }
+}
+
+impl<const K: usize> AddAssign<&Self> for PolyVec<K> {
+    fn add_assign(&mut self, rhs: &Self) {
+        for i in 0..K {
+            self.v[i] += &rhs.v[i];
+        }
+    }
+}
+
+impl<const K: usize> SubAssign<&Self> for PolyVec<K> {
+    fn sub_assign(&mut self, rhs: &Self) {
+        for i in 0..K {
+            self.v[i] -= &rhs.v[i];
         }
     }
 }
