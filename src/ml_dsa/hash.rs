@@ -1,4 +1,4 @@
-use core::mem;
+use core::mem::{transmute, transmute_copy, MaybeUninit};
 
 pub const SHAKE_128_RATE: usize = 168;
 pub const SHAKE_256_RATE: usize = 136;
@@ -10,7 +10,7 @@ const BLOCK_SIZE: usize = 25 * 8;
 
 #[inline(always)]
 fn keccak_permute_block(block: &mut [u8; BLOCK_SIZE]) {
-    keccak::f1600(unsafe { mem::transmute::<&mut [u8; BLOCK_SIZE], &mut [u64; 25]>(block) });
+    keccak::f1600(unsafe { transmute::<&mut [u8; BLOCK_SIZE], &mut [u64; 25]>(block) });
 }
 
 pub struct Shake<const R: usize> {
@@ -81,6 +81,29 @@ impl<const R: usize> Shake<R> {
                 out_idx += 1;
             }
         }
+    }
+
+    pub fn squeeze_array<const K: usize>(&mut self) -> [u8; K] {
+        let mut out: [MaybeUninit<u8>; K] = [MaybeUninit::uninit(); K];
+        let mut out_idx = 0;
+
+        while out_idx < K {
+            if self.pos == R {
+                keccak_permute_block(&mut self.block);
+
+                self.pos = 0;
+            }
+
+            let n = self.rem().min(K - out_idx);
+
+            for _ in 0..n {
+                out[out_idx].write(self.block[self.pos]);
+                self.pos += 1;
+                out_idx += 1;
+            }
+        }
+
+        unsafe { transmute_copy::<[MaybeUninit<u8>; K], [u8; K]>(&out) }
     }
 
     pub fn squeezeblock(&mut self) -> &[u8; R] {
