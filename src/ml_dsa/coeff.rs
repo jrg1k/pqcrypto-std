@@ -88,8 +88,8 @@ pub const fn make_hint<const G2: i32>(z: i32, r: i32) -> i32 {
     (z > G2 || z < -G2 || (z == -G2 && r != 0)) as i32
 }
 
-pub const fn norm(w: i32) -> i32 {
-    w - ((w >> 31) & (w << 1))
+pub const fn norm(w: i32) -> usize {
+    (w - ((w >> 31) & (w << 1))) as usize
 }
 
 #[cfg(test)]

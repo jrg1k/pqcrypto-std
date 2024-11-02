@@ -771,6 +771,18 @@ impl Poly {
             a[1] = B - ((b[2] >> 4) | (b[3] << 4) | (b[4] << 12));
         }
     }
+    const fn norm_in_bound(&self, bound: usize) -> bool {
+        let mut i = 0;
+        while i < N {
+            if coeff::norm(self.f[i]) >= bound {
+                return false;
+            }
+
+            i += 1;
+        }
+
+        true
+    }
 }
 
 impl AddAssign<&Poly> for Poly {
@@ -977,6 +989,19 @@ impl<const K: usize> PolyVec<K> {
 
             p.bitunpack_2pow19(blocks.first_chunk_mut().unwrap());
         }
+    }
+    const fn norm_in_bound(&self, bound: usize) -> bool {
+        let mut i = 0;
+
+        while i < K {
+            if !self.v[i].norm_in_bound(bound) {
+                return false;
+            }
+
+            i += 1;
+        }
+
+        true
     }
 }
 
