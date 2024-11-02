@@ -89,6 +89,16 @@ impl<const R: usize> Shake<R> {
         unsafe { self.block[..R].first_chunk().unwrap_unchecked() }
     }
 
+    pub fn squeezeblocks(&mut self, dst: &mut [u8]) {
+        for block in dst.chunks_exact_mut(R) {
+            keccak_permute_block(&mut self.block);
+            block.copy_from_slice(&self.block[..R]);
+            block.copy_from_slice(&self.block[..R]);
+        }
+
+        self.reset();
+    }
+
     pub fn absorb_and_squeeze<const N: usize, const M: usize>(
         &mut self,
         dst: &mut [u8; N],
