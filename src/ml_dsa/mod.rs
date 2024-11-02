@@ -710,6 +710,67 @@ impl Poly {
             a[7] = ETA - (((b[11] >> 3) | (b[12] << 5)) & 0x1FFF);
         }
     }
+    fn bitpack_2pow17(&self, z: &mut [u8; Self::packed_bytesize(18)]) {
+        const B: i32 = 1 << 17;
+
+        for (b, a) in z.chunks_exact_mut(9).zip(self.f.chunks_exact(4)) {
+            let a0 = B - a[0];
+            let a1 = B - a[1];
+            let a2 = B - a[2];
+            let a3 = B - a[3];
+
+            b[0] = (a0 >> 0) as u8;
+            b[1] = (a0 >> 8) as u8;
+            b[2] = ((a0 >> 16) | (a1 << 2)) as u8;
+            b[3] = (a1 >> 6) as u8;
+            b[4] = ((a1 >> 14) | (a2 << 4)) as u8;
+            b[5] = (a2 >> 4) as u8;
+            b[6] = ((a2 >> 12) | (a3 << 6)) as u8;
+            b[7] = (a3 >> 2) as u8;
+            b[8] = (a3 >> 10) as u8;
+        }
+    }
+
+    fn bitunpack_2pow17(&mut self, z: &[u8; Self::packed_bytesize(18)]) {
+        const B: i32 = 1 << 17;
+        const BITMASK: i32 = 0x3ffff;
+
+        for (a, b) in self.f.chunks_exact_mut(4).zip(z.chunks_exact(9)) {
+            let b: [i32; 9] = array::from_fn(|i| b[i] as i32);
+
+            a[0] = B - (((b[0] >> 0) | (b[1] << 8) | (b[2] << 16)) & BITMASK);
+            a[1] = B - (((b[2] >> 2) | (b[3] << 6) | (b[4] << 14)) & BITMASK);
+            a[2] = B - (((b[4] >> 4) | (b[5] << 4) | (b[6] << 12)) & BITMASK);
+            a[3] = B - ((b[6] >> 6) | (b[7] << 2) | (b[8] << 10));
+        }
+    }
+
+    fn bitpack_2pow19(&self, z: &mut [u8; Self::packed_bytesize(20)]) {
+        const B: i32 = 1 << 19;
+
+        for (b, a) in z.chunks_exact_mut(5).zip(self.f.chunks_exact(2)) {
+            let a0 = B - a[0];
+            let a1 = B - a[1];
+
+            b[0] = (a0 >> 0) as u8;
+            b[1] = (a0 >> 8) as u8;
+            b[2] = ((a0 >> 16) | (a1 << 4)) as u8;
+            b[3] = (a1 >> 4) as u8;
+            b[4] = (a1 >> 12) as u8;
+        }
+    }
+
+    fn bitunpack_2pow19(&mut self, z: &[u8; Self::packed_bytesize(20)]) {
+        const B: i32 = 1 << 19;
+        const BITMASK: i32 = 0xfffff;
+
+        for (a, b) in self.f.chunks_exact_mut(2).zip(z.chunks_exact(5)) {
+            let b: [i32; 5] = array::from_fn(|i| b[i] as i32);
+
+            a[0] = B - (((b[0] >> 0) | (b[1] << 8) | (b[2] << 16)) & BITMASK);
+            a[1] = B - ((b[2] >> 4) | (b[3] << 4) | (b[4] << 12));
+        }
+    }
 }
 
 impl AddAssign<&Poly> for Poly {
@@ -864,6 +925,38 @@ impl<const K: usize> PolyVec<K> {
             self.v[i].dot_prod_ntt(&m.m[i], v)
         }
     }
+    fn hint_bitpack<const OMEGA: usize>(&self, dst: &mut [u8]) {
+        let mut idx = 0;
+
+        for i in 0..K {
+            for j in 0..N {
+                let h = self.v[i].f[j] as usize;
+                dst[idx] = (j & h.wrapping_neg()) as u8;
+                idx += h;
+            }
+
+            dst[OMEGA + i] = idx as u8;
+        }
+    }
+
+    fn bitpack_2pow17(&self, dst: &mut [u8]) {
+        for (buf, p) in dst
+            .chunks_exact_mut(Poly::packed_bytesize(18))
+            .zip(self.v.iter())
+        {
+            p.bitpack_2pow17(buf.try_into().unwrap());
+        }
+    }
+
+    fn bitpack_2pow19(&self, dst: &mut [u8]) {
+        for (buf, p) in dst
+            .chunks_exact_mut(Poly::packed_bytesize(20))
+            .zip(self.v.iter())
+        {
+            p.bitpack_2pow19(buf.try_into().unwrap());
+        }
+    }
+
     fn expand_mask_2pow17(&mut self, rho: &[u8; 64], mu: usize, h: &mut hash::Shake256) {
         let mut blocks = [0u8; 5 * hash::SHAKE_256_RATE];
 
