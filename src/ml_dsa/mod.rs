@@ -683,6 +683,7 @@ impl Poly {
             a[7] = ETA - (((b[11] >> 3) | (b[12] << 5)) & 0x1FFF);
         }
     }
+
     fn bitpack_2pow17(&self, z: &mut [u8; Self::packed_bytesize(18)]) {
         const B: i32 = 1 << 17;
 
@@ -744,6 +745,7 @@ impl Poly {
             a[1] = B - ((b[2] >> 4) | (b[3] << 4) | (b[4] << 12));
         }
     }
+
     const fn norm_in_bound(&self, bound: usize) -> bool {
         let mut i = 0;
         while i < N {
@@ -993,6 +995,7 @@ impl<const K: usize> PolyVec<K> {
             p.bitunpack_2pow19(blocks.first_chunk_mut().unwrap());
         }
     }
+
     const fn norm_in_bound(&self, bound: usize) -> bool {
         let mut i = 0;
 
