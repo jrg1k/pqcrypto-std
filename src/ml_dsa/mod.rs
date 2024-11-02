@@ -576,19 +576,19 @@ impl Poly {
         }
     }
 
-    fn decompose_32(&self, f: &mut Self, g: &mut Self) {
+    fn decompose_32(&self, p0: &mut Self, p1: &mut Self) {
         for i in 0..N {
             let (r1, r0) = coeff::decompose_32(self.f[i]);
-            f.f[i] = r1;
-            g.f[i] = r0;
+            p0.f[i] = r0;
+            p1.f[i] = r1;
         }
     }
 
-    fn decompose_88(&self, f: &mut Self, g: &mut Self) {
+    fn decompose_88(&self, p0: &mut Self, p1: &mut Self) {
         for i in 0..N {
             let (r1, r0) = coeff::decompose_88(self.f[i]);
-            f.f[i] = r1;
-            g.f[i] = r0;
+            p0.f[i] = r0;
+            p1.f[i] = r1;
         }
     }
 
@@ -793,15 +793,15 @@ impl<const K: usize> PolyVec<K> {
         }
     }
 
-    fn decompose_32(&self, x1: &mut PolyVec<K>, x0: &mut PolyVec<K>) {
+    fn decompose_32(&self, x0: &mut PolyVec<K>, x1: &mut PolyVec<K>) {
         for i in 0..K {
-            self.v[i].decompose_32(&mut x1.v[i], &mut x0.v[i]);
+            self.v[i].decompose_32(&mut x0.v[i], &mut x1.v[i]);
         }
     }
 
-    fn decompose_88(&self, x1: &mut PolyVec<K>, x0: &mut PolyVec<K>) {
+    fn decompose_88(&self, x0: &mut PolyVec<K>, x1: &mut PolyVec<K>) {
         for i in 0..K {
-            self.v[i].decompose_88(&mut x1.v[i], &mut x0.v[i]);
+            self.v[i].decompose_88(&mut x0.v[i], &mut x1.v[i]);
         }
     }
 
