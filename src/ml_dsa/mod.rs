@@ -950,7 +950,7 @@ impl<const K: usize> PolyVec<K> {
         }
     }
 
-    fn pack_simple_6bit<const BZ: usize>(&self, z: &mut [u8; BZ]) {
+    fn pack_simple_6bit(&self, z: &mut [u8]) {
         for (chunk, p) in z
             .chunks_exact_mut(Poly::packed_bytesize(6))
             .zip(self.v.iter())
