@@ -1,9 +1,8 @@
 use core::{
     array,
-    mem::MaybeUninit,
+    mem::{transmute, transmute_copy, MaybeUninit},
     ops::{AddAssign, Mul, SubAssign},
 };
-
 use rand_core::CryptoRngCore;
 use zeroize::Zeroize;
 
@@ -68,23 +67,12 @@ const fn sig_size(k: usize, l: usize, lambda: usize, gamma1: usize, omega: usize
     lambda / 4 + l * 32 * (1 + bitsize(gamma1 - 1)) + omega + k
 }
 
-struct SignTmp<const K: usize, const L: usize> {
-    y: PolyVec<L>,
-    y_hat: PolyVec<L>,
-    w: PolyVec<K>,
-    w1: PolyVec<K>,
-    w0: PolyVec<K>,
-    z: PolyVec<L>,
-    h: PolyVec<K>,
-    c_hat: Poly,
-}
-
 pub mod mldsa44 {
-    use core::mem::MaybeUninit;
+    use rand_core::CryptoRngCore;
 
     use crate::ml_dsa::hash;
 
-    use super::{sig_size, sk_size, vk_size, Poly, Q};
+    use super::{sig_size, sk_size, vk_size, Poly, PolyVec, Q};
 
     const K: usize = 4;
     const L: usize = 4;
@@ -103,13 +91,20 @@ pub mod mldsa44 {
     pub type SigningKey = super::SigningKey<K, L, ETA>;
     pub type VerifyingKey = super::VerifyingKey<K>;
 
-    type SignTmp = super::SignTmp<K, L>;
-
     impl SigningKey {
-        pub fn sign_internal(&self, dst: &mut [u8; SIG_SIZE], m: &[u8], rnd: &[u8; 32]) {
-            let mut uninit_tmp: MaybeUninit<SignTmp> = MaybeUninit::uninit();
-            let tmp = unsafe { uninit_tmp.assume_init_mut() };
+        pub fn sign(
+            &self,
+            sig: &mut [u8; SIG_SIZE],
+            rng: &mut impl CryptoRngCore,
+            m: impl AsRef<[u8]>,
+        ) {
+            let mut rnd = [0u8; 32];
+            rng.fill_bytes(&mut rnd);
 
+            self.sign_internal(sig, m.as_ref(), &rnd)
+        }
+
+        pub(super) fn sign_internal(&self, dst: &mut [u8; SIG_SIZE], m: &[u8], rnd: &[u8; 32]) {
             let (c_tilde, buf): (&mut [u8; LAMBDA / 4], _) = dst.split_first_chunk_mut().unwrap();
             let (w1_bytes, buf): (&mut [u8; K * Poly::packed_bytesize(6)], _) =
                 buf.split_first_chunk_mut().unwrap();
@@ -122,52 +117,61 @@ pub mod mldsa44 {
 
             h.absorb_and_squeeze(rho_prime2, &[&self.k, rnd, mu]);
 
+            let mut y = PolyVec::zero();
+            let mut y_hat = PolyVec::zero();
+            let mut w = PolyVec::zero();
+            let mut w1 = PolyVec::zero();
+            let mut w0 = PolyVec::zero();
+            let mut z = PolyVec::zero();
+            let mut hint = PolyVec::zero();
+            let mut c_hat = Poly::zero();
+
             for nonce in (0..).step_by(L) {
-                tmp.y.expand_mask_2pow17(rho_prime2, nonce, &mut h);
+                y.expand_mask_2pow17(rho_prime2, nonce, &mut h);
 
-                tmp.y_hat.ntt(&tmp.y);
+                y_hat.ntt(&y);
 
-                tmp.w.multiply_matvec_ntt(&self.a_hat, &tmp.y_hat);
-                tmp.w.reduce_invntt_tomont_inplace();
+                w.multiply_matvec_ntt(&self.a_hat, &y_hat);
+                w.reduce_invntt_tomont_inplace();
 
-                tmp.w.decompose_88(&mut tmp.w0, &mut tmp.w1);
-                tmp.w1.pack_simple_6bit(w1_bytes);
+                w.decompose_88(&mut w0, &mut w1);
+                w1.pack_simple_6bit(w1_bytes);
                 h.absorb_and_squeeze(c_tilde, &[mu, w1_bytes]);
 
                 h.absorb(c_tilde);
                 h.finalize();
-                tmp.c_hat.sample_in_ball::<TAU>(&mut h);
-                tmp.c_hat.ntt_inplace();
+                c_hat.sample_in_ball::<TAU>(&mut h);
+                c_hat.ntt_inplace();
 
-                tmp.z.multiply_poly_ntt(&tmp.c_hat, &self.s1_hat);
-                tmp.z.invntt_tomont_inplace();
-                tmp.z += &tmp.y;
-                tmp.z.reduce();
+                z.multiply_poly_ntt(&c_hat, &self.s1_hat);
+                z.invntt_tomont_inplace();
+                z += &y;
+                z.reduce();
 
-                if !tmp.z.norm_in_bound(GAMMA1 - BETA) {
+                if !z.norm_in_bound(GAMMA1 - BETA) {
                     continue;
                 }
 
-                tmp.h.multiply_poly_ntt(&tmp.c_hat, &self.s2_hat);
-                tmp.h.invntt_tomont_inplace();
-                tmp.w0 -= &tmp.h;
-                tmp.w0.reduce();
+                hint.multiply_poly_ntt(&c_hat, &self.s2_hat);
+                hint.invntt_tomont_inplace();
+                w0 -= &hint;
+                w0.reduce();
 
-                if !tmp.w0.norm_in_bound(GAMMA2 - BETA) {
+                if !w0.norm_in_bound(GAMMA2 - BETA) {
                     continue;
                 }
 
-                tmp.h.multiply_poly_ntt(&tmp.c_hat, &self.t0_hat);
-                tmp.h.invntt_tomont_inplace();
-                tmp.h.reduce();
+                hint.multiply_poly_ntt(&c_hat, &self.t0_hat);
+                hint.invntt_tomont_inplace();
+                hint.reduce();
 
-                if !tmp.h.norm_in_bound(GAMMA2) {
+                if !hint.norm_in_bound(GAMMA2) {
                     continue;
                 }
 
-                tmp.w0 += &tmp.h;
+                w0 += &hint;
 
-                let count = tmp.h.make_hint::<{ GAMMA2 as i32 }>(&tmp.w0, &tmp.w1);
+                let count = hint.make_hint::<{ GAMMA2 as i32 }>(&w0, &w1);
 
                 if count > OMEGA {
                     continue;
@@ -176,18 +180,17 @@ pub mod mldsa44 {
                 break;
             }
 
-            tmp.z.bitpack_2pow17(&mut dst[LAMBDA / 4..]);
+            z.bitpack_2pow17(&mut dst[LAMBDA / 4..]);
 
-            tmp.h
-                .hint_bitpack::<OMEGA>(&mut dst[LAMBDA / 4 + L * Poly::packed_bytesize(18)..]);
+            hint.hint_bitpack::<OMEGA>(&mut dst[LAMBDA / 4 + L * Poly::packed_bytesize(18)..]);
         }
     }
 }
 
 pub mod mldsa65 {
-    use core::mem::MaybeUninit;
+    use rand_core::CryptoRngCore;
 
-    use super::{hash, sig_size, sk_size, vk_size, Poly, Q};
+    use super::{hash, sig_size, sk_size, vk_size, Poly, PolyVec, Q};
 
     const K: usize = 6;
     const L: usize = 5;
@@ -206,13 +209,20 @@ pub mod mldsa65 {
     pub type SigningKey = super::SigningKey<K, L, ETA>;
     pub type VerifyingKey = super::VerifyingKey<K>;
 
-    type SignTmp = super::SignTmp<K, L>;
-
     impl SigningKey {
-        pub fn sign_internal(&self, dst: &mut [u8; SIG_SIZE], m: &[u8], rnd: &[u8; 32]) {
-            let mut uninit_tmp: MaybeUninit<SignTmp> = MaybeUninit::uninit();
-            let tmp = unsafe { uninit_tmp.assume_init_mut() };
+        pub fn sign(
+            &self,
+            sig: &mut [u8; SIG_SIZE],
+            rng: &mut impl CryptoRngCore,
+            m: impl AsRef<[u8]>,
+        ) {
+            let mut rnd = [0u8; 32];
+            rng.fill_bytes(&mut rnd);
 
+            self.sign_internal(sig, m.as_ref(), &rnd)
+        }
+
+        pub(super) fn sign_internal(&self, dst: &mut [u8; SIG_SIZE], m: &[u8], rnd: &[u8; 32]) {
             let (c_tilde, buf): (&mut [u8; LAMBDA / 4], _) = dst.split_first_chunk_mut().unwrap();
             let (w1_bytes, buf): (&mut [u8; K * Poly::packed_bytesize(4)], _) =
                 buf.split_first_chunk_mut().unwrap();
@@ -225,52 +235,61 @@ pub mod mldsa65 {
 
             h.absorb_and_squeeze(rho_prime2, &[&self.k, rnd, mu]);
 
+            let mut y = PolyVec::zero();
+            let mut y_hat = PolyVec::zero();
+            let mut w = PolyVec::zero();
+            let mut w1 = PolyVec::zero();
+            let mut w0 = PolyVec::zero();
+            let mut z = PolyVec::zero();
+            let mut hint = PolyVec::zero();
+            let mut c_hat = Poly::zero();
+
             for nonce in (0..).step_by(L) {
-                tmp.y.expand_mask_2pow19(rho_prime2, nonce, &mut h);
+                y.expand_mask_2pow19(rho_prime2, nonce, &mut h);
 
-                tmp.y_hat.ntt(&tmp.y);
+                y_hat.ntt(&y);
 
-                tmp.w.multiply_matvec_ntt(&self.a_hat, &tmp.y_hat);
-                tmp.w.reduce_invntt_tomont_inplace();
+                w.multiply_matvec_ntt(&self.a_hat, &y_hat);
+                w.reduce_invntt_tomont_inplace();
 
-                tmp.w.decompose_32(&mut tmp.w0, &mut tmp.w1);
-                tmp.w1.pack_simple_4bit(w1_bytes);
+                w.decompose_32(&mut w0, &mut w1);
+                w1.pack_simple_4bit(w1_bytes);
                 h.absorb_and_squeeze(c_tilde, &[mu, w1_bytes]);
 
                 h.absorb(c_tilde);
                 h.finalize();
-                tmp.c_hat.sample_in_ball::<TAU>(&mut h);
-                tmp.c_hat.ntt_inplace();
+                c_hat.sample_in_ball::<TAU>(&mut h);
+                c_hat.ntt_inplace();
 
-                tmp.z.multiply_poly_ntt(&tmp.c_hat, &self.s1_hat);
-                tmp.z.invntt_tomont_inplace();
-                tmp.z += &tmp.y;
-                tmp.z.reduce();
+                z.multiply_poly_ntt(&c_hat, &self.s1_hat);
+                z.invntt_tomont_inplace();
+                z += &y;
+                z.reduce();
 
-                if !tmp.z.norm_in_bound(GAMMA1 - BETA) {
+                if !z.norm_in_bound(GAMMA1 - BETA) {
                     continue;
                 }
 
-                tmp.h.multiply_poly_ntt(&tmp.c_hat, &self.s2_hat);
-                tmp.h.invntt_tomont_inplace();
-                tmp.w0 -= &tmp.h;
-                tmp.w0.reduce();
+                hint.multiply_poly_ntt(&c_hat, &self.s2_hat);
+                hint.invntt_tomont_inplace();
+                w0 -= &hint;
+                w0.reduce();
 
-                if !tmp.w0.norm_in_bound(GAMMA2 - BETA) {
+                if !w0.norm_in_bound(GAMMA2 - BETA) {
                     continue;
                 }
 
-                tmp.h.multiply_poly_ntt(&tmp.c_hat, &self.t0_hat);
-                tmp.h.invntt_tomont_inplace();
-                tmp.h.reduce();
+                hint.multiply_poly_ntt(&c_hat, &self.t0_hat);
+                hint.invntt_tomont_inplace();
+                hint.reduce();
 
-                if !tmp.h.norm_in_bound(GAMMA2) {
+                if !hint.norm_in_bound(GAMMA2) {
                     continue;
                 }
 
-                tmp.w0 += &tmp.h;
+                w0 += &hint;
 
-                let count = tmp.h.make_hint::<{ GAMMA2 as i32 }>(&tmp.w0, &tmp.w1);
+                let count = hint.make_hint::<{ GAMMA2 as i32 }>(&w0, &w1);
 
                 if count > OMEGA {
                     continue;
@@ -279,18 +298,17 @@ pub mod mldsa65 {
                 break;
             }
 
-            tmp.z.bitpack_2pow19(&mut dst[LAMBDA / 4..]);
+            z.bitpack_2pow19(&mut dst[LAMBDA / 4..]);
 
-            tmp.h
-                .hint_bitpack::<OMEGA>(&mut dst[LAMBDA / 4 + L * Poly::packed_bytesize(20)..]);
+            hint.hint_bitpack::<OMEGA>(&mut dst[LAMBDA / 4 + L * Poly::packed_bytesize(20)..]);
         }
     }
 }
 
 pub mod mldsa87 {
-    use core::mem::MaybeUninit;
+    use rand_core::CryptoRngCore;
 
-    use super::{hash, sig_size, sk_size, vk_size, Poly, Q};
+    use super::{hash, sig_size, sk_size, vk_size, Poly, PolyVec, Q};
 
     const K: usize = 8;
     const L: usize = 7;
@@ -309,13 +327,20 @@ pub mod mldsa87 {
     pub type SigningKey = super::SigningKey<K, L, ETA>;
     pub type VerifyingKey = super::VerifyingKey<K>;
 
-    type SignTmp = super::SignTmp<K, L>;
-
     impl SigningKey {
-        pub fn sign_internal(&self, dst: &mut [u8; SIG_SIZE], m: &[u8], rnd: &[u8; 32]) {
-            let mut uninit_tmp: MaybeUninit<SignTmp> = MaybeUninit::uninit();
-            let tmp = unsafe { uninit_tmp.assume_init_mut() };
+        pub fn sign(
+            &self,
+            sig: &mut [u8; SIG_SIZE],
+            rng: &mut impl CryptoRngCore,
+            m: impl AsRef<[u8]>,
+        ) {
+            let mut rnd = [0u8; 32];
+            rng.fill_bytes(&mut rnd);
 
+            self.sign_internal(sig, m.as_ref(), &rnd)
+        }
+
+        pub(super) fn sign_internal(&self, dst: &mut [u8; SIG_SIZE], m: &[u8], rnd: &[u8; 32]) {
             let (c_tilde, buf): (&mut [u8; LAMBDA / 4], _) = dst.split_first_chunk_mut().unwrap();
             let (w1_bytes, buf): (&mut [u8; K * Poly::packed_bytesize(4)], _) =
                 buf.split_first_chunk_mut().unwrap();
@@ -328,52 +353,61 @@ pub mod mldsa87 {
 
             h.absorb_and_squeeze(rho_prime2, &[&self.k, rnd, mu]);
 
+            let mut y = PolyVec::zero();
+            let mut y_hat = PolyVec::zero();
+            let mut w = PolyVec::zero();
+            let mut w1 = PolyVec::zero();
+            let mut w0 = PolyVec::zero();
+            let mut z = PolyVec::zero();
+            let mut hint = PolyVec::zero();
+            let mut c_hat = Poly::zero();
+
             for nonce in (0..).step_by(L) {
-                tmp.y.expand_mask_2pow19(rho_prime2, nonce, &mut h);
+                y.expand_mask_2pow19(rho_prime2, nonce, &mut h);
 
-                tmp.y_hat.ntt(&tmp.y);
+                y_hat.ntt(&y);
 
-                tmp.w.multiply_matvec_ntt(&self.a_hat, &tmp.y_hat);
-                tmp.w.reduce_invntt_tomont_inplace();
+                w.multiply_matvec_ntt(&self.a_hat, &y_hat);
+                w.reduce_invntt_tomont_inplace();
 
-                tmp.w.decompose_32(&mut tmp.w0, &mut tmp.w1);
-                tmp.w1.pack_simple_4bit(w1_bytes);
+                w.decompose_32(&mut w0, &mut w1);
+                w1.pack_simple_4bit(w1_bytes);
                 h.absorb_and_squeeze(c_tilde, &[mu, w1_bytes]);
 
                 h.absorb(c_tilde);
                 h.finalize();
-                tmp.c_hat.sample_in_ball::<TAU>(&mut h);
-                tmp.c_hat.ntt_inplace();
+                c_hat.sample_in_ball::<TAU>(&mut h);
+                c_hat.ntt_inplace();
 
-                tmp.z.multiply_poly_ntt(&tmp.c_hat, &self.s1_hat);
-                tmp.z.invntt_tomont_inplace();
-                tmp.z += &tmp.y;
-                tmp.z.reduce();
+                z.multiply_poly_ntt(&c_hat, &self.s1_hat);
+                z.invntt_tomont_inplace();
+                z += &y;
+                z.reduce();
 
-                if !tmp.z.norm_in_bound(GAMMA1 - BETA) {
+                if !z.norm_in_bound(GAMMA1 - BETA) {
                     continue;
                 }
 
-                tmp.h.multiply_poly_ntt(&tmp.c_hat, &self.s2_hat);
-                tmp.h.invntt_tomont_inplace();
-                tmp.w0 -= &tmp.h;
-                tmp.w0.reduce();
+                hint.multiply_poly_ntt(&c_hat, &self.s2_hat);
+                hint.invntt_tomont_inplace();
+                w0 -= &hint;
+                w0.reduce();
 
-                if !tmp.w0.norm_in_bound(GAMMA2 - BETA) {
+                if !w0.norm_in_bound(GAMMA2 - BETA) {
                     continue;
                 }
 
-                tmp.h.multiply_poly_ntt(&tmp.c_hat, &self.t0_hat);
-                tmp.h.invntt_tomont_inplace();
-                tmp.h.reduce();
+                hint.multiply_poly_ntt(&c_hat, &self.t0_hat);
+                hint.invntt_tomont_inplace();
+                hint.reduce();
 
-                if !tmp.h.norm_in_bound(GAMMA2) {
+                if !hint.norm_in_bound(GAMMA2) {
                     continue;
                 }
 
-                tmp.w0 += &tmp.h;
+                w0 += &hint;
 
-                let count = tmp.h.make_hint::<{ GAMMA2 as i32 }>(&tmp.w0, &tmp.w1);
+                let count = hint.make_hint::<{ GAMMA2 as i32 }>(&w0, &w1);
 
                 if count > OMEGA {
                     continue;
@@ -382,10 +416,9 @@ pub mod mldsa87 {
                 break;
             }
 
-            tmp.z.bitpack_2pow19(&mut dst[LAMBDA / 4..]);
+            z.bitpack_2pow19(&mut dst[LAMBDA / 4..]);
 
-            tmp.h
-                .hint_bitpack::<OMEGA>(&mut dst[LAMBDA / 4 + L * Poly::packed_bytesize(20)..]);
+            hint.hint_bitpack::<OMEGA>(&mut dst[LAMBDA / 4 + L * Poly::packed_bytesize(20)..]);
         }
     }
 }
@@ -400,49 +433,28 @@ fn vk_encode<const K: usize>(dst: &mut [u8], rho: &[u8; 32], t1: &PolyVec<K>) {
     }
 }
 
-struct KeyGenTmp<const K: usize, const L: usize> {
-    rho_prime: [u8; 64],
-    t: PolyVec<K>,
-    t1: PolyVec<K>,
-}
-
-impl<const K: usize, const L: usize> Drop for KeyGenTmp<K, L> {
-    fn drop(&mut self) {
-        self.rho_prime.zeroize();
-    }
-}
-
 pub struct VerifyingKey<const K: usize> {
     rho: [u8; 32],
     t1: PolyVec<K>,
 }
 
 impl<const K: usize> VerifyingKey<K> {
-    const fn uninit() -> MaybeUninit<Self> {
-        MaybeUninit::uninit()
-    }
-
     pub fn encode(&self, dst: &mut [u8]) {
         vk_encode(dst, &self.rho, &self.t1)
     }
 
-    #[inline]
     pub fn decode(src: &[u8]) -> Self {
-        let mut uninit_vk = Self::uninit();
-        let vk = unsafe { uninit_vk.assume_init_mut() };
+        let rho = array::from_fn(|i| src[i]);
+        let mut t1 = PolyVec::zero();
 
-        vk.rho.copy_from_slice(&src[..32]);
-
-        for (xi, z) in vk
-            .t1
-            .v
-            .iter_mut()
-            .zip(src[32..].chunks_exact(Poly::PACKED_10BIT))
+        for (xi, z) in
+            t1.v.iter_mut()
+                .zip(src[32..].chunks_exact(Poly::PACKED_10BIT))
         {
             xi.unpack_simple_10bit(z.try_into().unwrap())
         }
 
-        unsafe { uninit_vk.assume_init() }
+        Self { rho, t1 }
     }
 }
 
@@ -464,11 +476,6 @@ impl<const K: usize, const L: usize, const ETA: usize> Drop for SigningKey<K, L,
 }
 
 impl<const K: usize, const L: usize, const ETA: usize> SigningKey<K, L, ETA> {
-    const fn uninit() -> MaybeUninit<Self> {
-        MaybeUninit::uninit()
-    }
-
-    #[inline]
     pub fn keygen<const VK_SIZE: usize>(
         vk: &mut [u8; VK_SIZE],
         rng: &mut impl CryptoRngCore,
@@ -478,68 +485,67 @@ impl<const K: usize, const L: usize, const ETA: usize> SigningKey<K, L, ETA> {
         let mut ksi = [0u8; 32];
         rng.fill_bytes(&mut ksi);
 
-        let mut sk = Self::uninit();
-        unsafe {
-            sk.assume_init_mut().keygen_internal(vk, &ksi);
-            ksi.zeroize();
-            sk.assume_init()
-        }
+        let sk = Self::keygen_internal(vk, &ksi);
+
+        ksi.zeroize();
+
+        sk
     }
 
     fn keygen_internal<const PUBKEY_SIZE: usize>(
-        &mut self,
         vk: &mut [u8; PUBKEY_SIZE],
         ksi: &[u8; 32],
-    ) {
-        let mut uninit_tmp: MaybeUninit<KeyGenTmp<K, L>> = MaybeUninit::uninit();
-        let tmp = unsafe { uninit_tmp.assume_init_mut() };
-
+    ) -> Self {
         let mut h = hash::Shake256::init();
         h.absorb_multi(&[ksi, &[K as u8], &[L as u8]]);
-        h.squeeze(&mut self.rho);
-        h.squeeze(&mut tmp.rho_prime);
-        h.squeeze(&mut self.k);
+        let rho: [u8; 32] = h.squeeze_array();
+        let rho_prime: [u8; 64] = h.squeeze_array();
+        let k: [u8; 32] = h.squeeze_array();
 
-        self.a_hat.expand_a(&self.rho);
-        expand_s::<K, L, ETA>(&mut self.s1_hat, &mut self.s2_hat, &tmp.rho_prime);
+        let mut s1_hat = PolyVec::zero();
+        let mut s2_hat = PolyVec::zero();
+        let mut t0_hat = PolyVec::zero();
+        let a_hat = PolyMat::expand_a(&rho);
 
-        self.s1_hat.ntt_inplace();
+        expand_s::<K, L, ETA>(&mut s1_hat, &mut s2_hat, &rho_prime);
 
-        tmp.t.multiply_matvec_ntt(&self.a_hat, &self.s1_hat);
-        tmp.t.reduce_invntt_tomont_inplace();
+        s1_hat.ntt_inplace();
 
-        tmp.t += &self.s2_hat;
+        let mut t = PolyVec::zero();
+        let mut t1 = PolyVec::zero();
 
-        tmp.t.power2round(&mut tmp.t1, &mut self.t0_hat);
+        t.multiply_matvec_ntt(&a_hat, &s1_hat);
+        t.reduce_invntt_tomont_inplace();
 
-        vk_encode(vk, &self.rho, &tmp.t1);
+        t += &s2_hat;
+
+        t.power2round(&mut t1, &mut t0_hat);
+
+        vk_encode(vk, &rho, &t1);
 
         h.reset();
         h.absorb(vk);
         h.finalize();
-        h.squeeze(&mut self.tr);
+        let tr: [u8; 64] = h.squeeze_array();
 
-        self.s2_hat.ntt_inplace();
-        self.t0_hat.ntt_inplace();
+        s2_hat.ntt_inplace();
+        t0_hat.ntt_inplace();
+
+        Self {
+            rho,
+            k,
+            tr,
+            s1_hat,
+            s2_hat,
+            t0_hat,
+            a_hat,
+        }
     }
 
     pub fn encode(&self, dst: &mut [u8]) {
-        struct Tmp<const K: usize, const L: usize> {
-            s1: PolyVec<L>,
-            s2: PolyVec<K>,
-            t0: PolyVec<K>,
-        }
-
-        impl<const L: usize, const K: usize> Drop for Tmp<L, K> {
-            fn drop(&mut self) {}
-        }
-
-        let mut uninit_tmp: MaybeUninit<Tmp<K, L>> = MaybeUninit::uninit();
-        let tmp = unsafe { uninit_tmp.assume_init_mut() };
-
-        tmp.s1.invntt(&self.s1_hat);
-        tmp.s2.invntt(&self.s2_hat);
-        tmp.t0.invntt(&self.t0_hat);
+        let s1 = self.s1_hat.invntt();
+        let s2 = self.s2_hat.invntt();
+        let t0 = self.t0_hat.invntt();
 
         dst[..32].copy_from_slice(&self.rho);
         dst[32..64].copy_from_slice(&self.k);
@@ -549,67 +555,81 @@ impl<const K: usize, const L: usize, const ETA: usize> SigningKey<K, L, ETA> {
 
         match ETA {
             2 => {
-                tmp.s1.pack_eta2(&mut buf[..L * Poly::PACKED_3BIT]);
+                s1.pack_eta2(&mut buf[..L * Poly::PACKED_3BIT]);
 
                 let buf = &mut buf[L * Poly::PACKED_3BIT..];
-                tmp.s2.pack_eta2(&mut buf[..K * Poly::PACKED_3BIT]);
+                s2.pack_eta2(&mut buf[..K * Poly::PACKED_3BIT]);
 
                 let buf = &mut buf[K * Poly::PACKED_3BIT..];
-                tmp.t0.pack_eta_2powdm1(buf)
+                t0.pack_eta_2powdm1(buf)
             }
             4 => {
-                tmp.s1.pack_eta4(&mut buf[..L * Poly::PACKED_4BIT]);
+                s1.pack_eta4(&mut buf[..L * Poly::PACKED_4BIT]);
 
                 let buf = &mut buf[L * Poly::PACKED_4BIT..];
-                tmp.s2.pack_eta4(buf);
+                s2.pack_eta4(buf);
 
                 let buf = &mut buf[K * Poly::PACKED_4BIT..];
-                tmp.t0.pack_eta_2powdm1(buf)
+                t0.pack_eta_2powdm1(buf)
             }
             _ => unreachable!(),
         }
     }
 
-    #[inline]
     pub fn decode(src: &[u8]) -> Self {
-        let mut uninit_sk = Self::uninit();
-        let sk = unsafe { uninit_sk.assume_init_mut() };
+        let mut rho: MaybeUninit<[u8; 32]> = MaybeUninit::uninit();
+        let mut k: MaybeUninit<[u8; 32]> = MaybeUninit::uninit();
+        let mut tr: MaybeUninit<[u8; 64]> = MaybeUninit::uninit();
 
-        sk.rho.copy_from_slice(&src[..32]);
-        sk.k.copy_from_slice(&src[32..64]);
-        sk.tr.copy_from_slice(&src[64..128]);
+        rho.write(src[..32].try_into().unwrap());
+        k.write(src[32..64].try_into().unwrap());
+        tr.write(src[64..128].try_into().unwrap());
+
+        let (rho, k, tr) = unsafe { (rho.assume_init(), k.assume_init(), tr.assume_init()) };
+
+        let mut s1_hat = PolyVec::zero();
+        let mut s2_hat = PolyVec::zero();
+        let mut t0_hat = PolyVec::zero();
 
         match ETA {
             2 => {
                 let z = &src[128..];
-                sk.s1_hat.unpack_eta2(&z[..L * Poly::PACKED_3BIT]);
+                s1_hat.unpack_eta2(&z[..L * Poly::PACKED_3BIT]);
 
                 let z = &z[L * Poly::PACKED_3BIT..];
-                sk.s2_hat.unpack_eta2(&z[..K * Poly::PACKED_3BIT]);
+                s2_hat.unpack_eta2(&z[..K * Poly::PACKED_3BIT]);
 
                 let z = &z[K * Poly::PACKED_3BIT..];
-                sk.t0_hat.unpack_eta_2powdm1(z)
+                t0_hat.unpack_eta_2powdm1(z)
             }
             4 => {
                 let z = &src[128..];
-                sk.s1_hat.unpack_eta4(&z[..L * Poly::PACKED_4BIT]);
+                s1_hat.unpack_eta4(&z[..L * Poly::PACKED_4BIT]);
 
                 let z = &z[L * Poly::PACKED_4BIT..];
-                sk.s2_hat.unpack_eta4(&z[..K * Poly::PACKED_4BIT]);
+                s2_hat.unpack_eta4(&z[..K * Poly::PACKED_4BIT]);
 
                 let z = &z[K * Poly::PACKED_4BIT..];
-                sk.t0_hat.unpack_eta_2powdm1(z)
+                t0_hat.unpack_eta_2powdm1(z)
             }
             _ => unreachable!(),
         }
 
-        sk.a_hat.expand_a(&sk.rho);
+        let a_hat = PolyMat::expand_a(&rho);
 
-        sk.s1_hat.ntt_inplace();
-        sk.s2_hat.ntt_inplace();
-        sk.t0_hat.ntt_inplace();
+        s1_hat.ntt_inplace();
+        s2_hat.ntt_inplace();
+        t0_hat.ntt_inplace();
 
-        unsafe { uninit_sk.assume_init() }
+        Self {
+            rho,
+            k,
+            tr,
+            s1_hat,
+            s2_hat,
+            t0_hat,
+            a_hat,
+        }
     }
 }
 
@@ -676,10 +696,14 @@ impl Poly {
     }
 
     /// NTT^-1 (w_hat)
-    fn invntt(&mut self, w: &Self) {
-        let w_hat = &mut self.f;
+    fn invntt(&self) -> Self {
+        let mut w_hat = [MaybeUninit::uninit(); N];
 
-        w_hat.copy_from_slice(&w.f);
+        for (i, a) in w_hat.iter_mut().enumerate() {
+            a.write(self.f[i]);
+        }
+
+        let mut w_hat = unsafe { transmute::<[MaybeUninit<i32>; N], [i32; N]>(w_hat) };
 
         let mut m = 255;
 
@@ -702,6 +726,8 @@ impl Poly {
         for a in w_hat.iter_mut() {
             *a = reduce::mont_mul(*a, DIV_256);
         }
+
+        Self { f: w_hat }
     }
 
     /// NTT^-1 (w_hat)
@@ -732,7 +758,8 @@ impl Poly {
     }
 
     /// RejNTTPoly(rho)
-    fn rej_ntt(&mut self, g: &mut hash::Shake128) {
+    fn rej_ntt(g: &mut hash::Shake128) -> Self {
+        let mut f: [MaybeUninit<i32>; N] = [MaybeUninit::uninit(); N];
         let mut idx = 0;
 
         while idx < N {
@@ -740,7 +767,7 @@ impl Poly {
 
             for b in bytes.chunks_exact(3) {
                 if let Some(a) = coeff::from_three_bytes(b[0], b[1], b[2]) {
-                    self.f[idx] = a;
+                    f[idx].write(a);
                     idx += 1;
                 }
 
@@ -748,6 +775,10 @@ impl Poly {
                     break;
                 }
             }
+        }
+
+        Self {
+            f: unsafe { transmute::<[MaybeUninit<i32>; N], [i32; N]>(f) },
         }
     }
 
@@ -1087,17 +1118,26 @@ struct PolyMat<const K: usize, const L: usize> {
 
 impl<const K: usize, const L: usize> PolyMat<K, L> {
     /// ExpandA(rho)
-    fn expand_a(&mut self, rho: &[u8; 32]) {
+    fn expand_a(rho: &[u8; 32]) -> Self {
         let mut g = hash::Shake128::init();
+        let mut m: [MaybeUninit<PolyVec<L>>; K] = [const { MaybeUninit::uninit() }; K];
 
-        for (r, polyvec) in self.m.iter_mut().enumerate() {
-            for (s, poly) in polyvec.v.iter_mut().enumerate() {
-                g.absorb_multi(&[rho, &u16::to_le_bytes(((r << 8) + s) as u16)]);
+        for (r, pvec) in m.iter_mut().enumerate() {
+            let mut v: [MaybeUninit<Poly>; L] = [const { MaybeUninit::uninit() }; L];
 
-                poly.rej_ntt(&mut g);
+            for (s, poly) in v.iter_mut().enumerate() {
+                g.absorb_multi(&[rho, &u16::to_le_bytes(((r << 8) | s) as u16)]);
+
+                poly.write(Poly::rej_ntt(&mut g));
 
                 g.reset();
             }
+
+            pvec.write(unsafe { transmute_copy(&v) });
+        }
+
+        Self {
+            m: unsafe { transmute_copy(&m) },
         }
     }
 }
@@ -1125,9 +1165,15 @@ impl<const K: usize> PolyVec<K> {
         }
     }
 
-    fn invntt(&mut self, v: &Self) {
-        for (p, v) in self.v.iter_mut().zip(&v.v) {
-            p.invntt(v);
+    fn invntt(&self) -> Self {
+        let mut v = [const { MaybeUninit::uninit() }; K];
+
+        for (i, p) in v.iter_mut().enumerate() {
+            p.write(self.v[i].invntt());
+        }
+
+        Self {
+            v: unsafe { transmute_copy(&v) },
         }
     }
 
@@ -1380,8 +1426,7 @@ mod tests {
                     let mut sk_bytes = [0u8; mldsa44::SK_SIZE];
 
                     for test in &tg.tests {
-                        let mut sk = unsafe { mldsa44::SigningKey::uninit().assume_init() };
-                        sk.keygen_internal(&mut vk_bytes, &test.seed);
+                        let sk = mldsa44::SigningKey::keygen_internal(&mut vk_bytes, &test.seed);
                         sk.encode(&mut sk_bytes);
 
                         assert_eq!(vk_bytes, test.pk[..]);
@@ -1401,8 +1446,7 @@ mod tests {
                     let mut sk_bytes = [0u8; mldsa65::SK_SIZE];
 
                     for test in &tg.tests {
-                        let mut sk = unsafe { mldsa65::SigningKey::uninit().assume_init() };
-                        sk.keygen_internal(&mut vk_bytes, &test.seed);
+                        let sk = mldsa65::SigningKey::keygen_internal(&mut vk_bytes, &test.seed);
                         sk.encode(&mut sk_bytes);
 
                         assert_eq!(vk_bytes, test.pk[..]);
@@ -1422,8 +1466,7 @@ mod tests {
                     let mut sk_bytes = [0u8; mldsa87::SK_SIZE];
 
                     for test in &tg.tests {
-                        let mut sk = unsafe { mldsa87::SigningKey::uninit().assume_init() };
-                        sk.keygen_internal(&mut vk_bytes, &test.seed);
+                        let sk = mldsa87::SigningKey::keygen_internal(&mut vk_bytes, &test.seed);
                         sk.encode(&mut sk_bytes);
 
                         assert_eq!(vk_bytes, test.pk[..]);
