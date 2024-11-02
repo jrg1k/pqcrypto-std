@@ -511,6 +511,37 @@ impl Poly {
         }
     }
 
+    /// SampleInBall(rho)
+    fn sample_in_ball<const TAU: usize>(&mut self, h: &mut hash::Shake256) {
+        self.f.fill(0);
+
+        let mut block = h.squeezeblock();
+
+        let mut hash = u64::from_le_bytes(block[..8].try_into().unwrap());
+
+        let mut iter = block[8..].iter();
+
+        let mut i = N - TAU;
+
+        while i < N {
+            let j = if let Some(j) = iter.by_ref().find(|b| (**b as usize) <= i) {
+                *j as usize
+            } else {
+                block = h.squeezeblock();
+                iter = block.iter();
+                continue;
+            };
+
+            self.f[i] = self.f[j];
+            self.f[j] = 1 - ((hash & 1) << 1) as i32;
+
+            hash >>= 1;
+            i += 1;
+        }
+
+        h.reset();
+    }
+
     fn multiply_ntt_acc(&mut self, a: &Self, b: &Self) {
         for i in 0..N {
             self.f[i] += reduce::mont_mul(a.f[i], b.f[i])
@@ -831,6 +862,27 @@ impl<const K: usize> PolyVec<K> {
     fn multiply_matvec_ntt<const L: usize>(&mut self, m: &PolyMat<K, L>, v: &PolyVec<L>) {
         for i in 0..K {
             self.v[i].dot_prod_ntt(&m.m[i], v)
+        }
+    }
+    fn expand_mask_2pow17(&mut self, rho: &[u8; 64], mu: usize, h: &mut hash::Shake256) {
+        let mut blocks = [0u8; 5 * hash::SHAKE_256_RATE];
+
+        for (r, p) in self.v.iter_mut().enumerate() {
+            h.absorb_multi(&[rho, &u16::to_le_bytes((mu + r) as u16)]);
+            h.squeezeblocks(&mut blocks);
+
+            p.bitunpack_2pow17(blocks.first_chunk_mut().unwrap());
+        }
+    }
+
+    fn expand_mask_2pow19(&mut self, rho: &[u8; 64], mu: usize, h: &mut hash::Shake256) {
+        let mut blocks = [0u8; 5 * hash::SHAKE_256_RATE];
+
+        for (r, p) in self.v.iter_mut().enumerate() {
+            h.absorb_multi(&[rho, &u16::to_le_bytes((mu + r) as u16)]);
+            h.squeezeblocks(&mut blocks);
+
+            p.bitunpack_2pow19(blocks.first_chunk_mut().unwrap());
         }
     }
 }
