@@ -1371,7 +1371,7 @@ mod tests {
         test_data_path.push("tests/mldsa-keygen.json");
 
         let test_data = read_to_string(&test_data_path).unwrap();
-        let test_data: Tests = serde_json::from_str(&test_data).unwrap();
+        let test_data: Tests<KeyGenTg> = serde_json::from_str(&test_data).unwrap();
 
         for tg in test_data.test_groups.iter() {
             match tg.parameter_set.as_str() {
@@ -1443,6 +1443,63 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_siggen() {
+        let mut test_data_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        test_data_path.push("tests/mldsa-sign.json");
+
+        let test_data = read_to_string(&test_data_path).unwrap();
+        let test_data: Tests<SigGenTg> = serde_json::from_str(&test_data).unwrap();
+
+        for tg in test_data.test_groups.iter() {
+            match tg.parameter_set.as_str() {
+                "ML-DSA-44" => {
+                    let mut sig = [0u8; mldsa44::SIG_SIZE];
+
+                    for test in tg.tests.iter() {
+                        sig.fill(0);
+                        let sk = mldsa44::SigningKey::decode(&test.sk);
+                        let rnd = match &test.rnd {
+                            Some(rnd) => rnd.rnd,
+                            None => [0; 32],
+                        };
+                        sk.sign_internal(&mut sig, &test.message, &rnd);
+                        assert_eq!(&sig, &test.signature[..]);
+                    }
+                }
+                "ML-DSA-65" => {
+                    let mut sig = [0u8; mldsa65::SIG_SIZE];
+
+                    for test in tg.tests.iter() {
+                        sig.fill(0);
+                        let sk = mldsa65::SigningKey::decode(&test.sk);
+                        let rnd = match &test.rnd {
+                            Some(rnd) => rnd.rnd,
+                            None => [0; 32],
+                        };
+                        sk.sign_internal(&mut sig, &test.message, &rnd);
+                        assert_eq!(&sig, &test.signature[..]);
+                    }
+                }
+                "ML-DSA-87" => {
+                    let mut sig = [0u8; mldsa87::SIG_SIZE];
+
+                    for test in tg.tests.iter() {
+                        sig.fill(0);
+                        let sk = mldsa87::SigningKey::decode(&test.sk);
+                        let rnd = match &test.rnd {
+                            Some(rnd) => rnd.rnd,
+                            None => [0; 32],
+                        };
+                        sk.sign_internal(&mut sig, &test.message, &rnd);
+                        assert_eq!(&sig, &test.signature[..]);
+                    }
+                }
+                _ => panic!("invalid paramter set"),
+            };
+        }
+    }
+
     #[derive(Deserialize)]
     struct KeyGenTV {
         #[serde(with = "hex")]
@@ -1462,8 +1519,36 @@ mod tests {
         tests: Vec<KeyGenTV>,
     }
     #[derive(Deserialize)]
-    struct Tests {
+    struct Tests<T> {
         #[serde(rename = "testGroups")]
-        test_groups: Vec<KeyGenTg>,
+        test_groups: Vec<T>,
+    }
+
+    #[derive(Deserialize)]
+    struct Rnd {
+        #[serde(with = "hex")]
+        rnd: [u8; 32],
+    }
+
+    #[derive(Deserialize)]
+    struct SigGenTV {
+        #[serde(with = "hex")]
+        message: Vec<u8>,
+
+        #[serde(with = "hex")]
+        signature: Vec<u8>,
+
+        #[serde(with = "hex")]
+        sk: Vec<u8>,
+
+        #[serde(flatten)]
+        rnd: Option<Rnd>,
+    }
+    #[derive(Deserialize)]
+    struct SigGenTg {
+        #[serde(rename = "parameterSet")]
+        parameter_set: String,
+
+        tests: Vec<SigGenTV>,
     }
 }
