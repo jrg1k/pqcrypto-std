@@ -93,6 +93,7 @@ pub mod mldsa44 {
     pub type VerifyingKey = super::VerifyingKey<K>;
 
     impl SigningKey {
+        #[inline]
         pub fn sign(
             &self,
             sig: &mut [u8; SIG_SIZE],
@@ -213,6 +214,7 @@ pub mod mldsa65 {
     pub type VerifyingKey = super::VerifyingKey<K>;
 
     impl SigningKey {
+        #[inline]
         pub fn sign(
             &self,
             sig: &mut [u8; SIG_SIZE],
@@ -333,6 +335,7 @@ pub mod mldsa87 {
     pub type VerifyingKey = super::VerifyingKey<K>;
 
     impl SigningKey {
+        #[inline]
         pub fn sign(
             &self,
             sig: &mut [u8; SIG_SIZE],
@@ -481,6 +484,7 @@ impl<const K: usize, const L: usize, const ETA: usize> Drop for SigningKey<K, L,
 }
 
 impl<const K: usize, const L: usize, const ETA: usize> SigningKey<K, L, ETA> {
+    #[inline]
     pub fn keygen<const VK_SIZE: usize>(
         vk: &mut [u8; VK_SIZE],
         rng: &mut impl CryptoRngCore,
@@ -547,6 +551,7 @@ impl<const K: usize, const L: usize, const ETA: usize> SigningKey<K, L, ETA> {
         }
     }
 
+    #[inline]
     pub fn encode(&self, dst: &mut [u8]) {
         let s1 = self.s1_hat.invntt();
         let s2 = self.s2_hat.invntt();
@@ -581,6 +586,7 @@ impl<const K: usize, const L: usize, const ETA: usize> SigningKey<K, L, ETA> {
         }
     }
 
+    #[inline]
     pub fn decode(src: &[u8]) -> Self {
         let mut rho: MaybeUninit<[u8; 32]> = MaybeUninit::uninit();
         let mut k: MaybeUninit<[u8; 32]> = MaybeUninit::uninit();

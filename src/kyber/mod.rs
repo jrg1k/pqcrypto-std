@@ -220,7 +220,6 @@ impl Poly {
         }
     }
 
-    #[inline]
     fn byte_decode(bytes: &[u8; Self::ENCODED_BYTES]) -> Self {
         let mut coeffs: [MaybeUninit<i16>; N] = [MaybeUninit::uninit(); N];
 
@@ -244,7 +243,6 @@ impl Poly {
         }
     }
 
-    #[inline]
     fn decompress(bytes: &[u8; Self::COMPRESSED_BYTES]) -> Self {
         const MOD_MASK: u8 = (1 << DV) - 1;
 
@@ -258,7 +256,6 @@ impl Poly {
         poly
     }
 
-    #[inline]
     fn generate_eta2<I>(r: &[u8; 32], nonce: &mut I) -> Self
     where
         I: Iterator<Item = usize>,
@@ -273,7 +270,6 @@ impl Poly {
         poly
     }
 
-    #[inline]
     fn from_msg(m: &[u8; 32]) -> Self {
         let mut poly = Poly::zero();
 
@@ -378,14 +374,12 @@ impl PolyVec {
         }
     }
 
-    #[inline]
     fn ntt(&mut self) {
         for p in self.vec.iter_mut() {
             p.ntt();
         }
     }
 
-    #[inline]
     fn invntt(&mut self) {
         for p in self.vec.iter_mut() {
             p.invntt();
@@ -402,7 +396,6 @@ impl PolyVec {
         }
     }
 
-    #[inline]
     fn from_bytes(bytes: &[u8; K * Poly::ENCODED_BYTES]) -> Self {
         let mut vec = [const { Poly::zero() }; K];
 
@@ -431,7 +424,6 @@ impl PolyVec {
         }
     }
 
-    #[inline]
     fn decompress(bytes: &[u8; Self::COMPRESSED_BYTES]) -> Self {
         let mut pvec = PolyVec::zero();
         for (p, b) in pvec
@@ -455,7 +447,6 @@ impl PolyVec {
         pvec
     }
 
-    #[inline]
     fn generate_eta2<I>(r: &[u8; 32], nonce: &mut I) -> Self
     where
         I: Iterator<Item = usize>,
@@ -486,7 +477,6 @@ impl AddAssign<&PolyVec> for PolyVec {
 impl Mul<&PolyVec> for &PolyVec {
     type Output = Poly;
 
-    #[inline]
     fn mul(self, rhs: &PolyVec) -> Self::Output {
         let mut out = Poly::zero();
 
@@ -506,7 +496,6 @@ struct PolyMatrix {
 }
 
 impl PolyMatrix {
-    #[inline]
     fn generate(xof: &mut hash::Shake128, rho: &[u8; 32]) -> Self {
         let mut m: [MaybeUninit<PolyVec>; K] = [const { MaybeUninit::uninit() }; K];
 
@@ -529,7 +518,6 @@ impl PolyMatrix {
         }
     }
 
-    #[inline]
     fn generate_transposed(xof: &mut hash::Shake128, rho: &[u8; 32]) -> Self {
         let mut m: [MaybeUninit<PolyVec>; K] = [const { MaybeUninit::uninit() }; K];
 
@@ -556,7 +544,6 @@ impl PolyMatrix {
 impl Mul<&PolyVec> for &PolyMatrix {
     type Output = PolyVec;
 
-    #[inline]
     fn mul(self, rhs: &PolyVec) -> Self::Output {
         let mut out = PolyVec::zero();
 
@@ -568,7 +555,6 @@ impl Mul<&PolyVec> for &PolyMatrix {
     }
 }
 
-#[inline]
 fn generate_se(prf: &mut hash::Shake256, sigma: &[u8; 32]) -> (PolyVec, PolyVec) {
     let mut s = PolyVec::zero();
     let mut e = PolyVec::zero();
@@ -600,7 +586,6 @@ impl PkeEncKey {
         bytes[PolyVec::BYTE_SIZE..].copy_from_slice(&self.rho);
     }
 
-    #[inline]
     fn from_bytes(bytes: &[u8; Self::BYTE_SIZE]) -> Self {
         let (t_bytes, bytes) = bytes.split_first_chunk().unwrap();
         let (rho, _) = bytes.split_first_chunk().unwrap();
@@ -658,7 +643,6 @@ impl PkeDecKey {
         self.s.byte_encode(bytes);
     }
 
-    #[inline]
     fn from_bytes(bytes: &[u8; Self::BYTE_SIZE]) -> Self {
         let mut s = PolyVec::from_bytes(bytes);
         s.reduce();
@@ -686,7 +670,6 @@ impl PkeDecKey {
 }
 
 /// Algorithm 13 K-PKE.KeyGen(d)
-#[inline]
 fn pke_keygen(d: &[u8; 32]) -> (PkeEncKey, PkeDecKey) {
     let (rho, sigma) = hash::sha3_512_split(&[d, &[K as u8]]);
 
@@ -718,6 +701,7 @@ impl EncapsKey {
     pub const BYTE_SIZE: usize = PkeEncKey::BYTE_SIZE;
     pub const CIPHERTEXT_SIZE: usize = PkeEncKey::CIPHERTEXT_SIZE;
 
+    #[inline]
     pub fn to_bytes(&self, bytes: &mut [u8; Self::BYTE_SIZE]) {
         self.ek_pke.to_bytes(bytes);
     }
@@ -748,6 +732,7 @@ impl EncapsKey {
     }
 
     /// Algorithm 20 ML-KEM.Encaps(ek)
+    #[inline]
     pub fn encaps(
         &self,
         c: &mut [u8; Self::CIPHERTEXT_SIZE],
@@ -769,6 +754,7 @@ pub struct DecapsKey {
 impl DecapsKey {
     pub const BYTE_SIZE: usize = PkeDecKey::BYTE_SIZE + PkeEncKey::BYTE_SIZE + 32 + 32;
 
+    #[inline]
     pub fn to_bytes(&self, bytes: &mut [u8; Self::BYTE_SIZE], ek: &EncapsKey) {
         let (dk_bytes, bytes) = bytes.split_first_chunk_mut().unwrap();
         let (ek_bytes, bytes) = bytes.split_first_chunk_mut().unwrap();
@@ -800,6 +786,7 @@ impl DecapsKey {
 
     /// Algorithm 21 ML-KEM.Decaps(dk, c)
     /// Algorithm 18 ML-KEM.Decaps_internal(dk, c)
+    #[inline]
     pub fn decaps(&self, k: &mut [u8; 32], ek: &EncapsKey, c: &[u8; EncapsKey::CIPHERTEXT_SIZE]) {
         let mut m_prime = [0u8; 32];
         self.dk_pke.decrypt(&mut m_prime, c);
@@ -853,7 +840,6 @@ pub fn keygen(rng: &mut impl CryptoRngCore) -> (EncapsKey, DecapsKey) {
     keygen_deterministic(d, z)
 }
 
-#[inline]
 fn keygen_deterministic(d: [u8; 32], z: [u8; 32]) -> (EncapsKey, DecapsKey) {
     let (ek_pke, dk_pke) = pke_keygen(&d);
 
