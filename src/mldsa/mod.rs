@@ -119,7 +119,7 @@ pub mod mldsa44 {
     pub type PrivateKey = super::PrivateKey<K, L, ETA>;
 
     /// Public Key used for verifying.
-    pub type PublicKey = super::PublicKey<K>;
+    pub type PublicKey = super::PublicKey<K, L>;
 
     impl SignerInternal for PrivateKey {
         fn sign_internal(&self, dst: &mut [u8], m: &[u8], rnd: &[u8; 32]) {
@@ -234,7 +234,7 @@ pub mod mldsa65 {
     pub type PrivateKey = super::PrivateKey<K, L, ETA>;
 
     /// Public Key used for verifying.
-    pub type PublicKey = super::PublicKey<K>;
+    pub type PublicKey = super::PublicKey<K, L>;
 
     impl SignerInternal for PrivateKey {
         fn sign_internal(&self, dst: &mut [u8], m: &[u8], rnd: &[u8; 32]) {
@@ -350,7 +350,7 @@ pub mod mldsa87 {
     pub type PrivateKey = super::PrivateKey<K, L, ETA>;
 
     /// Public Key used for verifying.
-    pub type PublicKey = super::PublicKey<K>;
+    pub type PublicKey = super::PublicKey<K, L>;
 
     impl SignerInternal for PrivateKey {
         fn sign_internal(&self, dst: &mut [u8], m: &[u8], rnd: &[u8; 32]) {
@@ -450,9 +450,10 @@ fn vk_encode<const K: usize>(dst: &mut [u8], rho: &[u8; 32], t1: &PolyVec<K>) {
 pub struct PublicKey<const K: usize, const L: usize> {
     rho: [u8; 32],
     t1: PolyVec<K>,
+    a_hat: PolyMat<K, L>,
 }
 
-impl<const K: usize> PublicKey<K, L> {
+impl<const K: usize, const L: usize> PublicKey<K, L> {
     /// Encode public key as bytes.
     pub fn encode(&self, dst: &mut [u8]) {
         vk_encode(dst, &self.rho, &self.t1)
@@ -470,7 +471,9 @@ impl<const K: usize> PublicKey<K, L> {
             xi.unpack_simple_10bit(z.try_into().unwrap())
         }
 
-        Self { rho, t1 }
+        let a_hat = PolyMat::expand_a(&rho);
+
+        Self { rho, t1, a_hat }
     }
 }
 
