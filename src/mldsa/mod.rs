@@ -1138,7 +1138,9 @@ impl<const K: usize, const L: usize> PolyMat<K, L> {
                 g.reset();
             }
 
-            pvec.write(unsafe { transmute_copy(&v) });
+            pvec.write(PolyVec {
+                v: unsafe { transmute_copy(&v) },
+            });
         }
 
         Self {
