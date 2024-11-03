@@ -1,4 +1,4 @@
-use crate::kyber::Q;
+use crate::mlkem::Q;
 
 const Q_HALF: i32 = (Q as i32 + 1) / 2;
 

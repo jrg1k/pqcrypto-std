@@ -1,4 +1,4 @@
-use crate::kyber::Q;
+use crate::mlkem::Q;
 
 pub const R_MOD_Q: i32 = -1044; // 2^16 mod Q
 pub const R2_MOD_Q: i32 = 1353; // (2^16)^2 mod Q
