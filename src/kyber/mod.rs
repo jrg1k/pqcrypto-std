@@ -13,19 +13,18 @@ use rand_core::CryptoRngCore;
 
 use crate::hash;
 
-pub const N: usize = 256;
-pub const K: usize = 3;
-pub const ETA1: usize = 2;
-pub const Q: i16 = 3329;
-pub const DU: usize = 10;
-pub const DV: usize = 4;
+const N: usize = 256;
+const K: usize = 3;
+const Q: i16 = 3329;
+const DU: usize = 10;
+const DV: usize = 4;
 
 const COEFFICIENT_BITSIZE: usize = 12;
 
 /// pre-computed zetas in montgomery form
 /// ordered by ZETAS\[i\] = z^BitRev7(i)
 /// zeta -> zeta * R (mod Q)
-pub const ZETAS: [i16; 128] = {
+const ZETAS: [i16; 128] = {
     const ZETA1: i16 = reduce::to_mont(17);
 
     let mut zetas = [0; 128];
