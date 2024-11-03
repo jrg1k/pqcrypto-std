@@ -50,6 +50,26 @@ const ZETAS: [i32; N] = {
     zetas_bitrev
 };
 
+trait SignerInternal {
+    fn sign_internal(&self, dst: &mut [u8], m: &[u8], rnd: &[u8; 32]);
+}
+
+/// Signatory in ML-DSA.
+pub trait Signer {
+    /// Sign message `m` using randomness from `rng`.
+    fn sign(&self, sig: &mut [u8], rng: &mut impl CryptoRngCore, m: impl AsRef<[u8]>);
+}
+
+impl<T: SignerInternal> Signer for T {
+    #[inline]
+    fn sign(&self, sig: &mut [u8], rng: &mut impl CryptoRngCore, m: impl AsRef<[u8]>) {
+        let mut rnd = [0u8; 32];
+        rng.fill_bytes(&mut rnd);
+
+        self.sign_internal(sig, m.as_ref(), &rnd)
+    }
+}
+
 const fn vk_size(k: usize) -> usize {
     k * Poly::PACKED_10BIT + 32
 }
@@ -71,11 +91,10 @@ const fn sig_size(k: usize, l: usize, lambda: usize, gamma1: usize, omega: usize
 }
 
 pub mod mldsa44 {
-    use rand_core::CryptoRngCore;
-
+    //! ML-DSA-44 parameter set.
     use crate::hash;
 
-    use super::{sig_size, sk_size, vk_size, Poly, PolyVec, Q};
+    use super::{sig_size, sk_size, vk_size, Poly, PolyVec, SignerInternal, Q};
 
     const K: usize = 4;
     const L: usize = 4;
@@ -93,21 +112,17 @@ pub mod mldsa44 {
     /// Private key bytesize.
     pub const PRIVKEY_SIZE: usize = sk_size(K, L, ETA);
 
-    impl SigningKey {
-        #[inline]
-        pub fn sign(
-            &self,
-            sig: &mut [u8; SIG_SIZE],
-            rng: &mut impl CryptoRngCore,
-            m: impl AsRef<[u8]>,
-        ) {
-            let mut rnd = [0u8; 32];
-            rng.fill_bytes(&mut rnd);
+    /// Signature bytesize.
+    pub const SIG_SIZE: usize = sig_size(K, L, LAMBDA, GAMMA1, OMEGA);
 
-            self.sign_internal(sig, m.as_ref(), &rnd)
-        }
+    /// Private key used for signing.
+    pub type PrivateKey = super::PrivateKey<K, L, ETA>;
 
-        pub(super) fn sign_internal(&self, dst: &mut [u8; SIG_SIZE], m: &[u8], rnd: &[u8; 32]) {
+    /// Public Key used for verifying.
+    pub type PublicKey = super::PublicKey<K>;
+
+    impl SignerInternal for PrivateKey {
+        fn sign_internal(&self, dst: &mut [u8], m: &[u8], rnd: &[u8; 32]) {
             let (c_tilde, buf): (&mut [u8; LAMBDA / 4], _) = dst.split_first_chunk_mut().unwrap();
             let (w1_bytes, buf): (&mut [u8; K * Poly::packed_bytesize(6)], _) =
                 buf.split_first_chunk_mut().unwrap();
@@ -191,12 +206,10 @@ pub mod mldsa44 {
 }
 
 pub mod mldsa65 {
-    use rand_core::CryptoRngCore;
-
     //! ML-DSA-65 parameter set.
     use crate::hash;
 
-    use super::{sig_size, sk_size, vk_size, Poly, PolyVec, Q};
+    use super::{sig_size, sk_size, vk_size, Poly, PolyVec, SignerInternal, Q};
 
     const K: usize = 6;
     const L: usize = 5;
@@ -214,21 +227,17 @@ pub mod mldsa65 {
     /// Private key bytesize.
     pub const PRIVKEY_SIZE: usize = sk_size(K, L, ETA);
 
-    impl SigningKey {
-        #[inline]
-        pub fn sign(
-            &self,
-            sig: &mut [u8; SIG_SIZE],
-            rng: &mut impl CryptoRngCore,
-            m: impl AsRef<[u8]>,
-        ) {
-            let mut rnd = [0u8; 32];
-            rng.fill_bytes(&mut rnd);
+    /// Signature bytesize.
+    pub const SIG_SIZE: usize = sig_size(K, L, LAMBDA, GAMMA1, OMEGA);
 
-            self.sign_internal(sig, m.as_ref(), &rnd)
-        }
+    /// Private key used for signing.
+    pub type PrivateKey = super::PrivateKey<K, L, ETA>;
 
-        pub(super) fn sign_internal(&self, dst: &mut [u8; SIG_SIZE], m: &[u8], rnd: &[u8; 32]) {
+    /// Public Key used for verifying.
+    pub type PublicKey = super::PublicKey<K>;
+
+    impl SignerInternal for PrivateKey {
+        fn sign_internal(&self, dst: &mut [u8], m: &[u8], rnd: &[u8; 32]) {
             let (c_tilde, buf): (&mut [u8; LAMBDA / 4], _) = dst.split_first_chunk_mut().unwrap();
             let (w1_bytes, buf): (&mut [u8; K * Poly::packed_bytesize(4)], _) =
                 buf.split_first_chunk_mut().unwrap();
@@ -312,12 +321,11 @@ pub mod mldsa65 {
 }
 
 pub mod mldsa87 {
-    use rand_core::CryptoRngCore;
     //! ML-DSA-87 parameter set.
 
     use crate::hash;
 
-    use super::{sig_size, sk_size, vk_size, Poly, PolyVec, Q};
+    use super::{sig_size, sk_size, vk_size, Poly, PolyVec, SignerInternal, Q};
 
     const K: usize = 8;
     const L: usize = 7;
@@ -335,21 +343,17 @@ pub mod mldsa87 {
     /// Private key bytesize.
     pub const PRIVKEY_SIZE: usize = sk_size(K, L, ETA);
 
-    impl SigningKey {
-        #[inline]
-        pub fn sign(
-            &self,
-            sig: &mut [u8; SIG_SIZE],
-            rng: &mut impl CryptoRngCore,
-            m: impl AsRef<[u8]>,
-        ) {
-            let mut rnd = [0u8; 32];
-            rng.fill_bytes(&mut rnd);
+    /// Signature bytesize.
+    pub const SIG_SIZE: usize = sig_size(K, L, LAMBDA, GAMMA1, OMEGA);
 
-            self.sign_internal(sig, m.as_ref(), &rnd)
-        }
+    /// Private key used for signing.
+    pub type PrivateKey = super::PrivateKey<K, L, ETA>;
 
-        pub(super) fn sign_internal(&self, dst: &mut [u8; SIG_SIZE], m: &[u8], rnd: &[u8; 32]) {
+    /// Public Key used for verifying.
+    pub type PublicKey = super::PublicKey<K>;
+
+    impl SignerInternal for PrivateKey {
+        fn sign_internal(&self, dst: &mut [u8], m: &[u8], rnd: &[u8; 32]) {
             let (c_tilde, buf): (&mut [u8; LAMBDA / 4], _) = dst.split_first_chunk_mut().unwrap();
             let (w1_bytes, buf): (&mut [u8; K * Poly::packed_bytesize(4)], _) =
                 buf.split_first_chunk_mut().unwrap();
