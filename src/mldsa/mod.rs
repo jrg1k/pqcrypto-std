@@ -1,3 +1,5 @@
+//! Implementation of ML-DSA (FIPS-204).
+
 use core::{
     array,
     mem::{transmute, transmute_copy, MaybeUninit},
@@ -85,12 +87,11 @@ pub mod mldsa44 {
     const BETA: usize = TAU * ETA;
     const OMEGA: usize = 80;
 
-    pub const VK_SIZE: usize = vk_size(K);
-    pub const SK_SIZE: usize = sk_size(K, L, ETA);
-    pub const SIG_SIZE: usize = sig_size(K, L, LAMBDA, GAMMA1, OMEGA);
+    /// Public key bytesize.
+    pub const PUBKEY_SIZE: usize = vk_size(K);
 
-    pub type SigningKey = super::SigningKey<K, L, ETA>;
-    pub type VerifyingKey = super::VerifyingKey<K>;
+    /// Private key bytesize.
+    pub const PRIVKEY_SIZE: usize = sk_size(K, L, ETA);
 
     impl SigningKey {
         #[inline]
@@ -192,6 +193,7 @@ pub mod mldsa44 {
 pub mod mldsa65 {
     use rand_core::CryptoRngCore;
 
+    //! ML-DSA-65 parameter set.
     use crate::hash;
 
     use super::{sig_size, sk_size, vk_size, Poly, PolyVec, Q};
@@ -206,12 +208,11 @@ pub mod mldsa65 {
     const BETA: usize = TAU * ETA;
     const OMEGA: usize = 55;
 
-    pub const VK_SIZE: usize = vk_size(K);
-    pub const SK_SIZE: usize = sk_size(K, L, ETA);
-    pub const SIG_SIZE: usize = sig_size(K, L, LAMBDA, GAMMA1, OMEGA);
+    /// Public key bytesize.
+    pub const PUBKEY_SIZE: usize = vk_size(K);
 
-    pub type SigningKey = super::SigningKey<K, L, ETA>;
-    pub type VerifyingKey = super::VerifyingKey<K>;
+    /// Private key bytesize.
+    pub const PRIVKEY_SIZE: usize = sk_size(K, L, ETA);
 
     impl SigningKey {
         #[inline]
@@ -312,6 +313,7 @@ pub mod mldsa65 {
 
 pub mod mldsa87 {
     use rand_core::CryptoRngCore;
+    //! ML-DSA-87 parameter set.
 
     use crate::hash;
 
@@ -327,12 +329,11 @@ pub mod mldsa87 {
     const BETA: usize = TAU * ETA;
     const OMEGA: usize = 75;
 
-    pub const VK_SIZE: usize = vk_size(K);
-    pub const SK_SIZE: usize = sk_size(K, L, ETA);
-    pub const SIG_SIZE: usize = sig_size(K, L, LAMBDA, GAMMA1, OMEGA);
+    /// Public key bytesize.
+    pub const PUBKEY_SIZE: usize = vk_size(K);
 
-    pub type SigningKey = super::SigningKey<K, L, ETA>;
-    pub type VerifyingKey = super::VerifyingKey<K>;
+    /// Private key bytesize.
+    pub const PRIVKEY_SIZE: usize = sk_size(K, L, ETA);
 
     impl SigningKey {
         #[inline]
@@ -441,16 +442,19 @@ fn vk_encode<const K: usize>(dst: &mut [u8], rho: &[u8; 32], t1: &PolyVec<K>) {
     }
 }
 
-pub struct VerifyingKey<const K: usize> {
+/// Public key used for verifying.
+pub struct PublicKey<const K: usize, const L: usize> {
     rho: [u8; 32],
     t1: PolyVec<K>,
 }
 
-impl<const K: usize> VerifyingKey<K> {
+impl<const K: usize> PublicKey<K, L> {
+    /// Encode public key as bytes.
     pub fn encode(&self, dst: &mut [u8]) {
         vk_encode(dst, &self.rho, &self.t1)
     }
 
+    /// Decode public key from bytes.
     pub fn decode(src: &[u8]) -> Self {
         let rho = array::from_fn(|i| src[i]);
         let mut t1 = PolyVec::zero();
@@ -466,7 +470,8 @@ impl<const K: usize> VerifyingKey<K> {
     }
 }
 
-pub struct SigningKey<const K: usize, const L: usize, const ETA: usize> {
+/// Private key used for signing.
+pub struct PrivateKey<const K: usize, const L: usize, const ETA: usize> {
     rho: [u8; 32],
     k: [u8; 32],
     tr: [u8; 64],
@@ -476,14 +481,15 @@ pub struct SigningKey<const K: usize, const L: usize, const ETA: usize> {
     a_hat: PolyMat<K, L>,
 }
 
-impl<const K: usize, const L: usize, const ETA: usize> Drop for SigningKey<K, L, ETA> {
+impl<const K: usize, const L: usize, const ETA: usize> Drop for PrivateKey<K, L, ETA> {
     fn drop(&mut self) {
         self.k.zeroize();
         self.tr.zeroize();
     }
 }
 
-impl<const K: usize, const L: usize, const ETA: usize> SigningKey<K, L, ETA> {
+impl<const K: usize, const L: usize, const ETA: usize> PrivateKey<K, L, ETA> {
+    /// Private key generation.
     #[inline]
     pub fn keygen<const VK_SIZE: usize>(
         vk: &mut [u8; VK_SIZE],
@@ -551,6 +557,7 @@ impl<const K: usize, const L: usize, const ETA: usize> SigningKey<K, L, ETA> {
         }
     }
 
+    /// Encode private key to bytes.
     #[inline]
     pub fn encode(&self, dst: &mut [u8]) {
         let s1 = self.s1_hat.invntt();
@@ -586,6 +593,7 @@ impl<const K: usize, const L: usize, const ETA: usize> SigningKey<K, L, ETA> {
         }
     }
 
+    /// Decode private key from bytes.
     #[inline]
     pub fn decode(src: &[u8]) -> Self {
         let mut rho: MaybeUninit<[u8; 32]> = MaybeUninit::uninit();
@@ -1435,61 +1443,61 @@ mod tests {
         for tg in test_data.test_groups.iter() {
             match tg.parameter_set.as_str() {
                 "ML-DSA-44" => {
-                    let mut vk_bytes = [0u8; mldsa44::VK_SIZE];
-                    let mut sk_bytes = [0u8; mldsa44::SK_SIZE];
+                    let mut vk_bytes = [0u8; mldsa44::PUBKEY_SIZE];
+                    let mut sk_bytes = [0u8; mldsa44::PRIVKEY_SIZE];
 
                     for test in &tg.tests {
-                        let sk = mldsa44::SigningKey::keygen_internal(&mut vk_bytes, &test.seed);
+                        let sk = mldsa44::PrivateKey::keygen_internal(&mut vk_bytes, &test.seed);
                         sk.encode(&mut sk_bytes);
 
                         assert_eq!(vk_bytes, test.pk[..]);
                         assert_eq!(sk_bytes, test.sk[..]);
 
-                        let sk_prime = mldsa44::SigningKey::decode(&test.sk);
+                        let sk_prime = mldsa44::PrivateKey::decode(&test.sk);
                         sk_prime.encode(&mut sk_bytes);
                         assert_eq!(sk_bytes, test.sk[..]);
 
-                        let vk_prime = mldsa44::VerifyingKey::decode(&test.pk);
+                        let vk_prime = mldsa44::PublicKey::decode(&test.pk);
                         vk_prime.encode(&mut vk_bytes);
                         assert_eq!(vk_bytes, test.pk[..]);
                     }
                 }
                 "ML-DSA-65" => {
-                    let mut vk_bytes = [0u8; mldsa65::VK_SIZE];
-                    let mut sk_bytes = [0u8; mldsa65::SK_SIZE];
+                    let mut vk_bytes = [0u8; mldsa65::PUBKEY_SIZE];
+                    let mut sk_bytes = [0u8; mldsa65::PRIVKEY_SIZE];
 
                     for test in &tg.tests {
-                        let sk = mldsa65::SigningKey::keygen_internal(&mut vk_bytes, &test.seed);
+                        let sk = mldsa65::PrivateKey::keygen_internal(&mut vk_bytes, &test.seed);
                         sk.encode(&mut sk_bytes);
 
                         assert_eq!(vk_bytes, test.pk[..]);
                         assert_eq!(sk_bytes, test.sk[..]);
 
-                        let sk_prime = mldsa65::SigningKey::decode(&test.sk);
+                        let sk_prime = mldsa65::PrivateKey::decode(&test.sk);
                         sk_prime.encode(&mut sk_bytes);
                         assert_eq!(sk_bytes, test.sk[..]);
 
-                        let vk_prime = mldsa65::VerifyingKey::decode(&test.pk);
+                        let vk_prime = mldsa65::PublicKey::decode(&test.pk);
                         vk_prime.encode(&mut vk_bytes);
                         assert_eq!(vk_bytes, test.pk[..]);
                     }
                 }
                 "ML-DSA-87" => {
-                    let mut vk_bytes = [0u8; mldsa87::VK_SIZE];
-                    let mut sk_bytes = [0u8; mldsa87::SK_SIZE];
+                    let mut vk_bytes = [0u8; mldsa87::PUBKEY_SIZE];
+                    let mut sk_bytes = [0u8; mldsa87::PRIVKEY_SIZE];
 
                     for test in &tg.tests {
-                        let sk = mldsa87::SigningKey::keygen_internal(&mut vk_bytes, &test.seed);
+                        let sk = mldsa87::PrivateKey::keygen_internal(&mut vk_bytes, &test.seed);
                         sk.encode(&mut sk_bytes);
 
                         assert_eq!(vk_bytes, test.pk[..]);
                         assert_eq!(sk_bytes, test.sk[..]);
 
-                        let sk_prime = mldsa87::SigningKey::decode(&test.sk);
+                        let sk_prime = mldsa87::PrivateKey::decode(&test.sk);
                         sk_prime.encode(&mut sk_bytes);
                         assert_eq!(sk_bytes, test.sk[..]);
 
-                        let vk_prime = mldsa87::VerifyingKey::decode(&test.pk);
+                        let vk_prime = mldsa87::PublicKey::decode(&test.pk);
                         vk_prime.encode(&mut vk_bytes);
                         assert_eq!(vk_bytes, test.pk[..]);
                     }
@@ -1514,7 +1522,7 @@ mod tests {
 
                     for test in tg.tests.iter() {
                         sig.fill(0);
-                        let sk = mldsa44::SigningKey::decode(&test.sk);
+                        let sk = mldsa44::PrivateKey::decode(&test.sk);
                         let rnd = match &test.rnd {
                             Some(rnd) => rnd.rnd,
                             None => [0; 32],
@@ -1528,7 +1536,7 @@ mod tests {
 
                     for test in tg.tests.iter() {
                         sig.fill(0);
-                        let sk = mldsa65::SigningKey::decode(&test.sk);
+                        let sk = mldsa65::PrivateKey::decode(&test.sk);
                         let rnd = match &test.rnd {
                             Some(rnd) => rnd.rnd,
                             None => [0; 32],
@@ -1542,7 +1550,7 @@ mod tests {
 
                     for test in tg.tests.iter() {
                         sig.fill(0);
-                        let sk = mldsa87::SigningKey::decode(&test.sk);
+                        let sk = mldsa87::PrivateKey::decode(&test.sk);
                         let rnd = match &test.rnd {
                             Some(rnd) => rnd.rnd,
                             None => [0; 32],

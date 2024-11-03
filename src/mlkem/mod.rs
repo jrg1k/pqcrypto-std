@@ -1,3 +1,4 @@
+//! Implementation of ML-KEM (FIPS-203)
 mod compress;
 mod reduce;
 
@@ -692,19 +693,25 @@ fn pke_keygen(d: &[u8; 32]) -> (PkeEncKey, PkeDecKey) {
     (PkeEncKey { t, rho }, PkeDecKey { s })
 }
 
+/// ML-KEM encapsulation key (public key).
 pub struct EncapsKey {
     ek_pke: PkeEncKey,
 }
 
 impl EncapsKey {
+    /// Byte size of the bit-packed key.
     pub const BYTE_SIZE: usize = PkeEncKey::BYTE_SIZE;
+
+    /// Byte size of the produced ciphertext.
     pub const CIPHERTEXT_SIZE: usize = PkeEncKey::CIPHERTEXT_SIZE;
 
+    /// Encode key to bytes.
     #[inline]
     pub fn to_bytes(&self, bytes: &mut [u8; Self::BYTE_SIZE]) {
         self.ek_pke.to_bytes(bytes);
     }
 
+    /// Decode key from bytes.
     #[inline]
     pub fn from_bytes(bytes: &[u8; Self::BYTE_SIZE]) -> Self {
         let ek_pke = PkeEncKey::from_bytes(bytes);
@@ -744,6 +751,7 @@ impl EncapsKey {
     }
 }
 
+/// ML-KEM decapsulation key (secret key).
 pub struct DecapsKey {
     dk_pke: PkeDecKey,
     h: [u8; 32],
@@ -751,8 +759,10 @@ pub struct DecapsKey {
 }
 
 impl DecapsKey {
+    /// Byte size of the bit-packed key.
     pub const BYTE_SIZE: usize = PkeDecKey::BYTE_SIZE + PkeEncKey::BYTE_SIZE + 32 + 32;
 
+    /// Encode key to bytes.
     #[inline]
     pub fn to_bytes(&self, bytes: &mut [u8; Self::BYTE_SIZE], ek: &EncapsKey) {
         let (dk_bytes, bytes) = bytes.split_first_chunk_mut().unwrap();
@@ -766,6 +776,7 @@ impl DecapsKey {
         z.copy_from_slice(&self.z);
     }
 
+    /// Decode key from bytes.
     #[inline]
     pub fn from_bytes(bytes: &[u8; Self::BYTE_SIZE]) -> Self {
         let (dk_bytes, bytes) = bytes.split_first_chunk().unwrap();
