@@ -1,17 +1,17 @@
 mod compress;
-mod hash;
 mod reduce;
 
+use compress::{compr_10bit, compr_1bit, compr_4bit, decompr_10bit, decompr_1bit, decompr_4bit};
 use core::{
     array,
     fmt::Display,
     hint::black_box,
-    mem::{self, MaybeUninit},
+    mem::{self, transmute, MaybeUninit},
     ops::{AddAssign, Mul, SubAssign},
 };
-use compress::{compr_10bit, compr_1bit, compr_4bit, decompr_10bit, decompr_1bit, decompr_4bit};
 use rand_core::CryptoRngCore;
-use sha3::digest::XofReader;
+
+use crate::hash;
 
 pub const N: usize = 256;
 pub const K: usize = 3;
@@ -119,55 +119,53 @@ impl Poly {
     }
 
     /// Algorithm 7 SampleNTT(B)
-    fn sample_ntt(&mut self, mut xof: impl XofReader) {
-        let f = &mut self.f;
+    fn sample_ntt(xof: &mut hash::Shake128) -> Self {
+        let mut f: [MaybeUninit<i16>; N] = [MaybeUninit::uninit(); N];
+        let mut idx = 0;
 
-        let mut b = [0u8; 3];
+        while idx < N {
+            let bytes = xof.squeezeblock();
 
-        let mut coeffs = f.iter_mut();
+            for d in bytes
+                .chunks_exact(3)
+                .flat_map(|b| {
+                    let (b0, b1, b2) = (b[0] as u16, b[1] as u16, b[2] as u16);
+                    let d1 = b0 | (b1 & 0xF) << 8;
+                    let d2 = b1 >> 4 | b2 << 4;
 
-        loop {
-            xof.read(&mut b);
-            let (b0, b1, b2) = (b[0] as u16, b[1] as u16, b[2] as u16);
+                    [d1, d2]
+                })
+                .filter(|d| *d < Q as u16)
+            {
+                f[idx].write(d as i16);
+                idx += 1;
 
-            let d1 = b0 | (b1 & 0xF) << 8;
-            let d2 = b1 >> 4 | b2 << 4;
-
-            if d1 < Q as u16 {
-                if let Some(a) = coeffs.next() {
-                    *a = d1 as i16;
-                } else {
-                    break;
-                }
-            }
-
-            if d2 < Q as u16 {
-                if let Some(a) = coeffs.next() {
-                    *a = d2 as i16;
-                } else {
+                if idx == N {
                     break;
                 }
             }
         }
+
+        Self {
+            f: unsafe { transmute::<[MaybeUninit<i16>; N], [i16; N]>(f) },
+        }
     }
 
     /// Algorithm 8 SamplePolyCBD_2 (B)
-    fn sample_poly_cbd2(&mut self, mut xof: impl XofReader) {
+    fn sample_poly_cbd2(&mut self, bytes: &[u8; 128]) {
         let f = &mut self.f;
-        let mut le_bytes = [0u8; 4];
 
-        for i in 0..32 {
-            xof.read(&mut le_bytes);
-            let t = u32::from_le_bytes(le_bytes);
+        for (i, bytes) in (0..N).step_by(8).zip(bytes.chunks_exact(4)) {
+            let t = u32::from_le_bytes(bytes.try_into().unwrap());
 
             // add bits to each other in groups of two
             let d = (t & 0x55555555) + ((t >> 1) & 0x55555555);
 
-            for j in 0..(32 / (2 * 2)) {
+            for j in 0..8 {
                 // extract two 2-bit numbers
                 let x = (d >> (j << 2)) & 3;
                 let y = (d >> ((j << 2) + 2)) & 3;
-                f[8 * i + j] = x as i16 - y as i16;
+                f[i + j] = x as i16 - y as i16;
             }
         }
     }
@@ -267,10 +265,11 @@ impl Poly {
     {
         let mut poly = Poly::zero();
 
-        let prf = hash::prf(r, nonce.next().unwrap());
-
-        poly.sample_poly_cbd2(prf);
-
+        let mut prf = hash::Shake256::init();
+        prf.absorb_multi(&[r, &[nonce.next().unwrap() as u8]]);
+        let block = prf.squeezeblock();
+        poly.sample_poly_cbd2(&block[..128].try_into().unwrap());
+        prf.reset();
         poly
     }
 
@@ -457,32 +456,19 @@ impl PolyVec {
     }
 
     #[inline]
-    fn generate_eta1<I>(r: &[u8; 32], nonce: &mut I) -> Self
-    where
-        I: Iterator<Item = usize>,
-    {
-        let mut pvec = PolyVec::zero();
-
-        for (poly, nonce) in pvec.vec.iter_mut().zip(nonce) {
-            let prf = hash::prf(r, nonce);
-
-            poly.sample_poly_cbd2(prf);
-        }
-
-        pvec
-    }
-
-    #[inline]
     fn generate_eta2<I>(r: &[u8; 32], nonce: &mut I) -> Self
     where
         I: Iterator<Item = usize>,
     {
         let mut pvec = PolyVec::zero();
 
-        for (poly, nonce) in pvec.vec.iter_mut().zip(nonce) {
-            let prf = hash::prf(r, nonce);
+        let mut prf = hash::Shake256::init();
 
-            poly.sample_poly_cbd2(prf);
+        for (poly, nonce) in pvec.vec.iter_mut().zip(nonce) {
+            prf.absorb_multi(&[r, &[nonce as u8]]);
+            let block = prf.squeezeblock();
+            poly.sample_poly_cbd2(&block[..128].try_into().unwrap());
+            prf.reset();
         }
 
         pvec
@@ -521,33 +507,49 @@ struct PolyMatrix {
 
 impl PolyMatrix {
     #[inline]
-    fn generate(rho: &[u8; 32]) -> Self {
-        let mut m = [const { PolyVec::zero() }; K];
+    fn generate(xof: &mut hash::Shake128, rho: &[u8; 32]) -> Self {
+        let mut m: [MaybeUninit<PolyVec>; K] = [const { MaybeUninit::uninit() }; K];
 
-        for (i, polyvec) in m.iter_mut().enumerate() {
-            for (j, poly) in polyvec.vec.iter_mut().enumerate() {
-                let xof = hash::xof(rho, j, i);
+        for (i, pvec) in m.iter_mut().enumerate() {
+            let mut v: [MaybeUninit<Poly>; K] = [const { MaybeUninit::uninit() }; K];
 
-                poly.sample_ntt(xof);
+            for (j, poly) in v.iter_mut().enumerate() {
+                xof.absorb_multi(&[rho, &u16::to_le_bytes((j | (i << 8)) as u16)]);
+                poly.write(Poly::sample_ntt(xof));
+                xof.reset();
             }
+
+            pvec.write(PolyVec {
+                vec: unsafe { transmute::<[MaybeUninit<Poly>; 3], [Poly; 3]>(v) },
+            });
         }
 
-        Self { m }
+        Self {
+            m: unsafe { transmute::<[MaybeUninit<PolyVec>; 3], [PolyVec; 3]>(m) },
+        }
     }
 
     #[inline]
-    fn generate_transposed(rho: &[u8; 32]) -> Self {
-        let mut m = [const { PolyVec::zero() }; K];
+    fn generate_transposed(xof: &mut hash::Shake128, rho: &[u8; 32]) -> Self {
+        let mut m: [MaybeUninit<PolyVec>; K] = [const { MaybeUninit::uninit() }; K];
 
-        for (i, polyvec) in m.iter_mut().enumerate() {
-            for (j, poly) in polyvec.vec.iter_mut().enumerate() {
-                let xof = hash::xof(rho, i, j);
+        for (i, pvec) in m.iter_mut().enumerate() {
+            let mut v: [MaybeUninit<Poly>; K] = [const { MaybeUninit::uninit() }; K];
 
-                poly.sample_ntt(xof);
+            for (j, poly) in v.iter_mut().enumerate() {
+                xof.absorb_multi(&[rho, &u16::to_le_bytes((i | (j << 8)) as u16)]);
+                poly.write(Poly::sample_ntt(xof));
+                xof.reset();
             }
+
+            pvec.write(PolyVec {
+                vec: unsafe { transmute::<[MaybeUninit<Poly>; 3], [Poly; 3]>(v) },
+            });
         }
 
-        Self { m }
+        Self {
+            m: unsafe { transmute::<[MaybeUninit<PolyVec>; 3], [PolyVec; 3]>(m) },
+        }
     }
 }
 
@@ -567,14 +569,17 @@ impl Mul<&PolyVec> for &PolyMatrix {
 }
 
 #[inline]
-fn generate_se(sigma: &[u8; 32]) -> (PolyVec, PolyVec) {
+fn generate_se(prf: &mut hash::Shake256, sigma: &[u8; 32]) -> (PolyVec, PolyVec) {
     let mut s = PolyVec::zero();
     let mut e = PolyVec::zero();
 
     for (nonce, poly) in s.vec.iter_mut().chain(e.vec.iter_mut()).enumerate() {
-        let prf = hash::prf(sigma, nonce);
+        prf.absorb_multi(&[sigma, &[nonce as u8]]);
 
-        poly.sample_poly_cbd2(prf);
+        let block = prf.squeezeblock();
+        poly.sample_poly_cbd2(&block[..128].try_into().unwrap());
+
+        prf.reset();
         poly.ntt();
     }
 
@@ -608,11 +613,12 @@ impl PkeEncKey {
 
     /// Algorithm 14 K-PKE.Encrypt(ek_PKE, m, r)
     fn encrypt(&self, c: &mut [u8; Self::CIPHERTEXT_SIZE], m: &[u8; 32], r: &[u8; 32]) {
-        let at = PolyMatrix::generate_transposed(&self.rho);
+        let mut xof = hash::Shake128::init();
+        let at = PolyMatrix::generate_transposed(&mut xof, &self.rho);
 
         let mut nonces = 0..(2 * K + 1);
 
-        let mut y = PolyVec::generate_eta1(r, &mut nonces);
+        let mut y = PolyVec::generate_eta2(r, &mut nonces);
         let e1 = PolyVec::generate_eta2(r, &mut nonces);
 
         let e2 = Poly::generate_eta2(r, &mut nonces);
@@ -682,11 +688,14 @@ impl PkeDecKey {
 /// Algorithm 13 K-PKE.KeyGen(d)
 #[inline]
 fn pke_keygen(d: &[u8; 32]) -> (PkeEncKey, PkeDecKey) {
-    let (rho, sigma) = hash::g(&[d, &[K as u8]]);
+    let (rho, sigma) = hash::sha3_512_split(&[d, &[K as u8]]);
 
-    let a = PolyMatrix::generate(&rho);
+    let mut xof = hash::Shake128::init();
+    let a = PolyMatrix::generate(&mut xof, &rho);
 
-    let (s, e) = generate_se(&sigma);
+    let mut prf = hash::Shake256::init();
+
+    let (s, e) = generate_se(&mut prf, &sigma);
 
     let mut t: PolyVec = PolyVec::zero();
 
@@ -727,12 +736,11 @@ impl EncapsKey {
         k: &mut [u8; 32],
         m: &[u8; 32],
     ) {
-        let mut h = [0u8; 32];
         let mut bytes = [0u8; Self::BYTE_SIZE];
         self.to_bytes(&mut bytes);
-        hash::h(&mut h, &bytes);
+        let h = hash::sha3_256(&[&bytes]);
 
-        let (key, r) = hash::g(&[m, &h]);
+        let (key, r) = hash::sha3_512_split(&[m, &h]);
 
         self.ek_pke.encrypt(c, m, &r);
 
@@ -769,7 +777,7 @@ impl DecapsKey {
 
         self.dk_pke.to_bytes(dk_bytes);
         ek.ek_pke.to_bytes(ek_bytes);
-        hash::h(ek_hash, ek_bytes);
+        hash::sha3_256_into(ek_hash, &[ek_bytes]);
         z.copy_from_slice(&self.z);
     }
 
@@ -796,9 +804,11 @@ impl DecapsKey {
         let mut m_prime = [0u8; 32];
         self.dk_pke.decrypt(&mut m_prime, c);
 
-        let (k_prime, r_prime) = hash::g(&[&m_prime, &self.h]);
+        let (k_prime, r_prime) = hash::sha3_512_split(&[&m_prime, &self.h]);
 
-        hash::j(k, &[&self.z, c]);
+        let mut j = hash::Shake256::init();
+        j.absorb_multi(&[&self.z, c]);
+        k.copy_from_slice(&j.squeezeblock()[..32]);
 
         let mut c_prime = [0u8; EncapsKey::CIPHERTEXT_SIZE];
         ek.ek_pke.encrypt(&mut c_prime, &m_prime, &r_prime);
@@ -851,8 +861,8 @@ fn keygen_deterministic(d: [u8; 32], z: [u8; 32]) -> (EncapsKey, DecapsKey) {
 
     let mut ek_bytes = [0u8; EncapsKey::BYTE_SIZE];
     ek.to_bytes(&mut ek_bytes);
-    let mut h = [0u8; 32];
-    hash::h(&mut h, &ek_bytes);
+
+    let h = hash::sha3_256(&[&ek_bytes]);
 
     (ek, DecapsKey { dk_pke, h, z })
 }

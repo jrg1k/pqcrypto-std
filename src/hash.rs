@@ -2,28 +2,38 @@ use core::mem::{transmute, transmute_copy, MaybeUninit};
 
 pub const SHAKE_128_RATE: usize = 168;
 pub const SHAKE_256_RATE: usize = 136;
+pub const SHA3_256_RATE: usize = 136;
+pub const SHA3_512_RATE: usize = 72;
 
-pub type Shake128 = Shake<SHAKE_128_RATE>;
-pub type Shake256 = Shake<SHAKE_256_RATE>;
+const SHAKE_PAD: u8 = 0x1F;
+
+pub type Shake128 = Keccak<SHAKE_128_RATE, SHAKE_PAD>;
+pub type Shake256 = Keccak<SHAKE_256_RATE, SHAKE_PAD>;
+
+const SHA3_PAD: u8 = 0x6;
+
+type Sha3_256 = Keccak<SHA3_256_RATE, SHA3_PAD>;
+type Sha3_512 = Keccak<SHA3_512_RATE, SHA3_PAD>;
 
 const BLOCK_SIZE: usize = 25 * 8;
 
-#[inline(always)]
-fn keccak_permute_block(block: &mut [u8; BLOCK_SIZE]) {
-    keccak::f1600(unsafe { transmute::<&mut [u8; BLOCK_SIZE], &mut [u64; 25]>(block) });
-}
-
-pub struct Shake<const R: usize> {
+pub struct Keccak<const R: usize, const P: u8> {
     block: [u8; BLOCK_SIZE],
     pos: usize,
 }
 
-impl<const R: usize> Shake<R> {
+impl<const R: usize, const P: u8> Keccak<R, P> {
     pub const fn init() -> Self {
         Self {
             block: [0; BLOCK_SIZE],
             pos: 0,
         }
+    }
+
+    fn keccak_permute(&mut self) {
+        keccak::f1600(unsafe {
+            transmute::<&mut [u8; BLOCK_SIZE], &mut [u64; 25]>(&mut self.block)
+        });
     }
 
     pub fn absorb_multi<const K: usize>(&mut self, src: &[&[u8]; K]) {
@@ -44,7 +54,7 @@ impl<const R: usize> Shake<R> {
                 rem -= 1;
             }
 
-            keccak_permute_block(&mut self.block);
+            self.keccak_permute();
 
             self.pos = 0;
         }
@@ -58,7 +68,7 @@ impl<const R: usize> Shake<R> {
     }
 
     pub fn finalize(&mut self) {
-        self.block[self.pos] ^= 0x1F;
+        self.block[self.pos] ^= P;
         self.block[R - 1] ^= 1 << 7;
         self.pos = R;
     }
@@ -68,7 +78,7 @@ impl<const R: usize> Shake<R> {
 
         while out_idx < dst.len() {
             if self.pos == R {
-                keccak_permute_block(&mut self.block);
+                self.keccak_permute();
 
                 self.pos = 0;
             }
@@ -89,7 +99,7 @@ impl<const R: usize> Shake<R> {
 
         while out_idx < K {
             if self.pos == R {
-                keccak_permute_block(&mut self.block);
+                self.keccak_permute();
 
                 self.pos = 0;
             }
@@ -107,15 +117,14 @@ impl<const R: usize> Shake<R> {
     }
 
     pub fn squeezeblock(&mut self) -> &[u8; R] {
-        keccak_permute_block(&mut self.block);
+        self.keccak_permute();
 
         unsafe { self.block[..R].first_chunk().unwrap_unchecked() }
     }
 
     pub fn squeezeblocks(&mut self, dst: &mut [u8]) {
         for block in dst.chunks_exact_mut(R) {
-            keccak_permute_block(&mut self.block);
-            block.copy_from_slice(&self.block[..R]);
+            self.keccak_permute();
             block.copy_from_slice(&self.block[..R]);
         }
 
@@ -144,4 +153,23 @@ impl<const R: usize> Shake<R> {
     const fn rem(&self) -> usize {
         R - self.pos
     }
+}
+
+pub fn sha3_256<const K: usize>(src: &[&[u8]; K]) -> [u8; 32] {
+    let mut s = Sha3_256::init();
+    s.absorb_multi(src);
+    s.squeeze_array()
+}
+
+pub fn sha3_256_into<const K: usize>(dst: &mut [u8; 32], src: &[&[u8]; K]) {
+    let mut s = Sha3_256::init();
+    s.absorb_multi(src);
+    dst.copy_from_slice(&s.squeezeblock()[..32]);
+}
+
+pub fn sha3_512_split<const K: usize>(src: &[&[u8]; K]) -> ([u8; 32], [u8; 32]) {
+    let mut s = Sha3_512::init();
+    s.absorb_multi(src);
+
+    (s.squeeze_array(), s.squeeze_array())
 }

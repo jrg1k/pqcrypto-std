@@ -6,8 +6,9 @@ use core::{
 use rand_core::CryptoRngCore;
 use zeroize::Zeroize;
 
+use crate::hash;
+
 mod coeff;
-mod hash;
 mod reduce;
 
 const Q: i32 = 8380417;
@@ -70,7 +71,7 @@ const fn sig_size(k: usize, l: usize, lambda: usize, gamma1: usize, omega: usize
 pub mod mldsa44 {
     use rand_core::CryptoRngCore;
 
-    use crate::mldsa::hash;
+    use crate::hash;
 
     use super::{sig_size, sk_size, vk_size, Poly, PolyVec, Q};
 
@@ -190,7 +191,9 @@ pub mod mldsa44 {
 pub mod mldsa65 {
     use rand_core::CryptoRngCore;
 
-    use super::{hash, sig_size, sk_size, vk_size, Poly, PolyVec, Q};
+    use crate::hash;
+
+    use super::{sig_size, sk_size, vk_size, Poly, PolyVec, Q};
 
     const K: usize = 6;
     const L: usize = 5;
@@ -308,7 +311,9 @@ pub mod mldsa65 {
 pub mod mldsa87 {
     use rand_core::CryptoRngCore;
 
-    use super::{hash, sig_size, sk_size, vk_size, Poly, PolyVec, Q};
+    use crate::hash;
+
+    use super::{sig_size, sk_size, vk_size, Poly, PolyVec, Q};
 
     const K: usize = 8;
     const L: usize = 7;

@@ -3,3 +3,5 @@
 
 pub mod kyber;
 pub mod mldsa;
+
+mod hash;
