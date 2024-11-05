@@ -58,6 +58,7 @@ trait SignerInternal {
 enum VerifyError {
     ZoutOfBound,
     Mismatch,
+    TooManyHints,
 }
 
 impl core::fmt::Display for VerifyError {
@@ -65,6 +66,7 @@ impl core::fmt::Display for VerifyError {
         match self {
             VerifyError::ZoutOfBound => f.write_str("z is out of bound"),
             VerifyError::Mismatch => f.write_str("signature mismatch"),
+            VerifyError::TooManyHints => f.write_str("too many hints in signature"),
         }
     }
 }
@@ -90,6 +92,8 @@ trait VerifierInternal<
 
     fn w1encode(w1: &PolyVec<K>) -> [u8; W1_BYTES];
 
+    fn use_hint(w1: &mut PolyVec<K>, h: &PolyVec<K>);
+
     fn pk(&self) -> &PublicKey<K, L>;
 
     fn verify_internal(&self, m: &[u8], sig: &[u8]) -> Result<(), VerifyError> {
@@ -97,7 +101,7 @@ trait VerifierInternal<
         let (z_bytes, sig) = sig.split_first_chunk::<Z_BYTES>().unwrap();
         let h_bytes: &[u8; H_BYTES] = sig.try_into().unwrap();
 
-        let hint: PolyVec<K> = PolyVec::hint_bitunpack(h_bytes, Self::OMEGA).unwrap();
+        let hint: PolyVec<K> = PolyVec::hint_bitunpack(h_bytes, Self::OMEGA)?;
 
         let mut z_hat = Self::bitunpack_z_hat(z_bytes);
 
@@ -105,24 +109,26 @@ trait VerifierInternal<
             return Err(VerifyError::ZoutOfBound);
         }
 
-        z_hat.ntt_inplace();
-
         let pk = self.pk();
 
         let mut h = hash::Shake256::init();
-
-        let mut c_hat = Poly::zero();
-        h.absorb(c_tilde);
-        h.finalize();
-        c_hat.sample_in_ball(&mut h, Self::TAU);
-        c_hat.ntt_inplace();
 
         h.absorb_multi(&[&pk.tr, m]);
         let mu: [u8; 64] = h.squeeze_array();
         h.reset();
 
+        let mut c_hat = Poly::zero();
+        h.absorb(c_tilde);
+        h.finalize();
+        c_hat.sample_in_ball(&mut h, Self::TAU);
+        h.reset();
+
+        z_hat.ntt_inplace();
+
         let mut w1 = PolyVec::zero();
         w1.multiply_matvec_ntt(&pk.a_hat, &z_hat);
+
+        c_hat.ntt_inplace();
 
         let mut t1 = pk.t1.shifted_left(D);
         t1.ntt_inplace();
@@ -130,7 +136,7 @@ trait VerifierInternal<
 
         w1 -= &t1;
         w1.reduce_invntt_tomont_inplace();
-        w1.use_hint(&hint, Self::GAMMA2 as i32);
+        Self::use_hint(&mut w1, &hint);
 
         let w1_bytes = Self::w1encode(&w1);
 
@@ -188,7 +194,8 @@ pub mod mldsa44 {
     use crate::hash;
 
     use super::{
-        bitlen, sig_size, sk_size, vk_size, Poly, PolyVec, SignerInternal, VerifierInternal, Q,
+        bitlen, coeff, sig_size, sk_size, vk_size, Poly, PolyVec, SignerInternal, VerifierInternal,
+        Q,
     };
 
     const K: usize = 4;
@@ -200,6 +207,11 @@ pub mod mldsa44 {
     const TAU: usize = 39;
     const BETA: usize = TAU * ETA;
     const OMEGA: usize = 80;
+
+    const CT_BYTES: usize = LAMBDA / 4;
+    const Z_BYTES: usize = L * 32 * (1 + bitlen(GAMMA1 - 1));
+    const H_BYTES: usize = OMEGA + K;
+    const W1_BYTES: usize = K * 32 * bitlen((Q as usize - 1) / (2 * GAMMA2) - 1);
 
     /// Public key bytesize.
     pub const PUBKEY_SIZE: usize = vk_size(K);
@@ -218,11 +230,10 @@ pub mod mldsa44 {
 
     impl SignerInternal for PrivateKey {
         fn sign_internal(&self, dst: &mut [u8], m: &[u8], rnd: &[u8; 32]) {
-            let (c_tilde, buf): (&mut [u8; LAMBDA / 4], _) = dst.split_first_chunk_mut().unwrap();
-            let (w1_bytes, buf): (&mut [u8; K * Poly::packed_bytesize(6)], _) =
-                buf.split_first_chunk_mut().unwrap();
-            let (mu, buf): (&mut [u8; 64], _) = buf.split_first_chunk_mut().unwrap();
-            let (rho_prime2, _): (&mut [u8; 64], _) = buf.split_first_chunk_mut().unwrap();
+            let (c_tilde, buf) = dst.split_first_chunk_mut::<CT_BYTES>().unwrap();
+            let (w1_bytes, buf) = buf.split_first_chunk_mut::<W1_BYTES>().unwrap();
+            let (mu, buf) = buf.split_first_chunk_mut::<64>().unwrap();
+            let rho_prime2: &mut [u8; 64] = buf.first_chunk_mut().unwrap();
 
             let mut h = hash::Shake256::init();
 
@@ -253,7 +264,9 @@ pub mod mldsa44 {
 
                 h.absorb(c_tilde);
                 h.finalize();
+                c_hat.f.fill(0);
                 c_hat.sample_in_ball(&mut h, TAU);
+                h.reset();
                 c_hat.ntt_inplace();
 
                 z.multiply_poly_ntt(&c_hat, &self.s1_hat);
@@ -293,16 +306,11 @@ pub mod mldsa44 {
                 break;
             }
 
-            z.bitpack_2pow17(&mut dst[LAMBDA / 4..]);
+            z.bitpack_2pow17(&mut dst[CT_BYTES..]);
 
-            hint.hint_bitpack::<OMEGA>(&mut dst[LAMBDA / 4 + L * Poly::packed_bytesize(18)..]);
+            hint.hint_bitpack::<OMEGA>(&mut dst[CT_BYTES + Z_BYTES..]);
         }
     }
-
-    const CT_BYTES: usize = LAMBDA / 4;
-    const Z_BYTES: usize = L * 32 * (1 + bitlen(GAMMA1 - 1));
-    const H_BYTES: usize = OMEGA + K;
-    const W1_BYTES: usize = K * 32 * bitlen((Q as usize - 1) / (2 * GAMMA2) - 1);
 
     impl VerifierInternal<K, L, CT_BYTES, Z_BYTES, H_BYTES, W1_BYTES> for PublicKey {
         const OMEGA: usize = OMEGA;
@@ -341,6 +349,14 @@ pub mod mldsa44 {
             unsafe { transmute(bytes) }
         }
 
+        fn use_hint(w1: &mut PolyVec<K>, h: &PolyVec<K>) {
+            for (i, poly) in w1.v.iter_mut().enumerate() {
+                for (j, a) in poly.f.iter_mut().enumerate() {
+                    *a = coeff::use_hint_88(h.v[i].f[j] as usize, *a);
+                }
+            }
+        }
+
         fn pk(&self) -> &super::PublicKey<K, L> {
             self
         }
@@ -349,9 +365,14 @@ pub mod mldsa44 {
 
 pub mod mldsa65 {
     //! ML-DSA-65 parameter set.
+    use core::mem::{transmute, MaybeUninit};
+
     use crate::hash;
 
-    use super::{sig_size, sk_size, vk_size, Poly, PolyVec, SignerInternal, Q};
+    use super::{
+        bitlen, coeff, sig_size, sk_size, vk_size, Poly, PolyVec, SignerInternal, VerifierInternal,
+        Q,
+    };
 
     const K: usize = 6;
     const L: usize = 5;
@@ -363,6 +384,11 @@ pub mod mldsa65 {
     const BETA: usize = TAU * ETA;
     const OMEGA: usize = 55;
 
+    const CT_BYTES: usize = LAMBDA / 4;
+    const Z_BYTES: usize = L * 32 * (1 + bitlen(GAMMA1 - 1));
+    const H_BYTES: usize = OMEGA + K;
+    const W1_BYTES: usize = K * 32 * bitlen((Q as usize - 1) / (2 * GAMMA2) - 1);
+
     /// Public key bytesize.
     pub const PUBKEY_SIZE: usize = vk_size(K);
 
@@ -380,11 +406,10 @@ pub mod mldsa65 {
 
     impl SignerInternal for PrivateKey {
         fn sign_internal(&self, dst: &mut [u8], m: &[u8], rnd: &[u8; 32]) {
-            let (c_tilde, buf): (&mut [u8; LAMBDA / 4], _) = dst.split_first_chunk_mut().unwrap();
-            let (w1_bytes, buf): (&mut [u8; K * Poly::packed_bytesize(4)], _) =
-                buf.split_first_chunk_mut().unwrap();
-            let (mu, buf): (&mut [u8; 64], _) = buf.split_first_chunk_mut().unwrap();
-            let (rho_prime2, _): (&mut [u8; 64], _) = buf.split_first_chunk_mut().unwrap();
+            let (c_tilde, buf) = dst.split_first_chunk_mut::<CT_BYTES>().unwrap();
+            let (w1_bytes, buf) = buf.split_first_chunk_mut::<W1_BYTES>().unwrap();
+            let (mu, buf) = buf.split_first_chunk_mut::<64>().unwrap();
+            let rho_prime2: &mut [u8; 64] = buf.first_chunk_mut().unwrap();
 
             let mut h = hash::Shake256::init();
 
@@ -415,7 +440,9 @@ pub mod mldsa65 {
 
                 h.absorb(c_tilde);
                 h.finalize();
+                c_hat.f.fill(0);
                 c_hat.sample_in_ball(&mut h, TAU);
+                h.reset();
                 c_hat.ntt_inplace();
 
                 z.multiply_poly_ntt(&c_hat, &self.s1_hat);
@@ -455,9 +482,59 @@ pub mod mldsa65 {
                 break;
             }
 
-            z.bitpack_2pow19(&mut dst[LAMBDA / 4..]);
+            z.bitpack_2pow19(&mut dst[CT_BYTES..]);
 
-            hint.hint_bitpack::<OMEGA>(&mut dst[LAMBDA / 4 + L * Poly::packed_bytesize(20)..]);
+            hint.hint_bitpack::<OMEGA>(&mut dst[CT_BYTES + Z_BYTES..]);
+        }
+    }
+
+    impl VerifierInternal<K, L, CT_BYTES, Z_BYTES, H_BYTES, W1_BYTES> for PublicKey {
+        const OMEGA: usize = OMEGA;
+
+        const TAU: usize = TAU;
+
+        const GAMMA1: usize = GAMMA1;
+
+        const GAMMA2: usize = GAMMA2;
+
+        const BETA: usize = BETA;
+
+        fn bitunpack_z_hat(b: &[u8; Z_BYTES]) -> PolyVec<L> {
+            let mut pvec = PolyVec::zero();
+
+            for (poly, bytes) in pvec
+                .v
+                .iter_mut()
+                .zip(b.chunks_exact(Poly::packed_bytesize(20)))
+            {
+                poly.bitunpack_2pow19(bytes.try_into().unwrap());
+            }
+
+            pvec
+        }
+
+        fn w1encode(w1: &PolyVec<K>) -> [u8; W1_BYTES] {
+            let mut bytes = [const { MaybeUninit::uninit() }; W1_BYTES];
+            for (chunk, p) in bytes
+                .chunks_exact_mut(Poly::packed_bytesize(4))
+                .zip(w1.v.iter())
+            {
+                p.pack_simple_uninit_4bit(chunk.try_into().unwrap());
+            }
+
+            unsafe { transmute(bytes) }
+        }
+
+        fn use_hint(w1: &mut PolyVec<K>, h: &PolyVec<K>) {
+            for (i, poly) in w1.v.iter_mut().enumerate() {
+                for (j, a) in poly.f.iter_mut().enumerate() {
+                    *a = coeff::use_hint_32(h.v[i].f[j] as usize, *a);
+                }
+            }
+        }
+
+        fn pk(&self) -> &PublicKey {
+            self
         }
     }
 }
@@ -465,9 +542,14 @@ pub mod mldsa65 {
 pub mod mldsa87 {
     //! ML-DSA-87 parameter set.
 
+    use core::mem::{transmute, MaybeUninit};
+
     use crate::hash;
 
-    use super::{sig_size, sk_size, vk_size, Poly, PolyVec, SignerInternal, Q};
+    use super::{
+        bitlen, coeff, sig_size, sk_size, vk_size, Poly, PolyVec, SignerInternal, VerifierInternal,
+        Q,
+    };
 
     const K: usize = 8;
     const L: usize = 7;
@@ -479,6 +561,11 @@ pub mod mldsa87 {
     const BETA: usize = TAU * ETA;
     const OMEGA: usize = 75;
 
+    const CT_BYTES: usize = LAMBDA / 4;
+    const Z_BYTES: usize = L * 32 * (1 + bitlen(GAMMA1 - 1));
+    const H_BYTES: usize = OMEGA + K;
+    const W1_BYTES: usize = K * 32 * bitlen((Q as usize - 1) / (2 * GAMMA2) - 1);
+
     /// Public key bytesize.
     pub const PUBKEY_SIZE: usize = vk_size(K);
 
@@ -496,11 +583,10 @@ pub mod mldsa87 {
 
     impl SignerInternal for PrivateKey {
         fn sign_internal(&self, dst: &mut [u8], m: &[u8], rnd: &[u8; 32]) {
-            let (c_tilde, buf): (&mut [u8; LAMBDA / 4], _) = dst.split_first_chunk_mut().unwrap();
-            let (w1_bytes, buf): (&mut [u8; K * Poly::packed_bytesize(4)], _) =
-                buf.split_first_chunk_mut().unwrap();
-            let (mu, buf): (&mut [u8; 64], _) = buf.split_first_chunk_mut().unwrap();
-            let (rho_prime2, _): (&mut [u8; 64], _) = buf.split_first_chunk_mut().unwrap();
+            let (c_tilde, buf) = dst.split_first_chunk_mut::<CT_BYTES>().unwrap();
+            let (w1_bytes, buf) = buf.split_first_chunk_mut::<W1_BYTES>().unwrap();
+            let (mu, buf) = buf.split_first_chunk_mut::<64>().unwrap();
+            let rho_prime2: &mut [u8; 64] = buf.first_chunk_mut().unwrap();
 
             let mut h = hash::Shake256::init();
 
@@ -531,7 +617,9 @@ pub mod mldsa87 {
 
                 h.absorb(c_tilde);
                 h.finalize();
+                c_hat.f.fill(0);
                 c_hat.sample_in_ball(&mut h, TAU);
+                h.reset();
                 c_hat.ntt_inplace();
 
                 z.multiply_poly_ntt(&c_hat, &self.s1_hat);
@@ -571,9 +659,59 @@ pub mod mldsa87 {
                 break;
             }
 
-            z.bitpack_2pow19(&mut dst[LAMBDA / 4..]);
+            z.bitpack_2pow19(&mut dst[CT_BYTES..]);
 
-            hint.hint_bitpack::<OMEGA>(&mut dst[LAMBDA / 4 + L * Poly::packed_bytesize(20)..]);
+            hint.hint_bitpack::<OMEGA>(&mut dst[CT_BYTES + Z_BYTES..]);
+        }
+    }
+
+    impl VerifierInternal<K, L, CT_BYTES, Z_BYTES, H_BYTES, W1_BYTES> for PublicKey {
+        const OMEGA: usize = OMEGA;
+
+        const TAU: usize = TAU;
+
+        const GAMMA1: usize = GAMMA1;
+
+        const GAMMA2: usize = GAMMA2;
+
+        const BETA: usize = BETA;
+
+        fn bitunpack_z_hat(b: &[u8; Z_BYTES]) -> PolyVec<L> {
+            let mut pvec = PolyVec::zero();
+
+            for (poly, bytes) in pvec
+                .v
+                .iter_mut()
+                .zip(b.chunks_exact(Poly::packed_bytesize(20)))
+            {
+                poly.bitunpack_2pow19(bytes.try_into().unwrap());
+            }
+
+            pvec
+        }
+
+        fn w1encode(w1: &PolyVec<K>) -> [u8; W1_BYTES] {
+            let mut bytes = [const { MaybeUninit::uninit() }; W1_BYTES];
+            for (chunk, p) in bytes
+                .chunks_exact_mut(Poly::packed_bytesize(4))
+                .zip(w1.v.iter())
+            {
+                p.pack_simple_uninit_4bit(chunk.try_into().unwrap());
+            }
+
+            unsafe { transmute(bytes) }
+        }
+
+        fn use_hint(w1: &mut PolyVec<K>, h: &PolyVec<K>) {
+            for (i, poly) in w1.v.iter_mut().enumerate() {
+                for (j, a) in poly.f.iter_mut().enumerate() {
+                    *a = coeff::use_hint_32(h.v[i].f[j] as usize, *a);
+                }
+            }
+        }
+
+        fn pk(&self) -> &PublicKey {
+            self
         }
     }
 }
@@ -978,8 +1116,6 @@ impl Poly {
 
     /// SampleInBall(rho)
     fn sample_in_ball(&mut self, h: &mut hash::Shake256, tau: usize) {
-        self.f.fill(0);
-
         let mut block = h.squeezeblock();
 
         let mut hash = u64::from_le_bytes(block[..8].try_into().unwrap());
@@ -1003,8 +1139,6 @@ impl Poly {
             hash >>= 1;
             i += 1;
         }
-
-        h.reset();
     }
 
     fn multiply_ntt_acc(&mut self, a: &Self, b: &Self) {
@@ -1082,6 +1216,12 @@ impl Poly {
     fn pack_simple_4bit(&self, z: &mut [u8; Self::packed_bytesize(4)]) {
         for (b, a) in z.iter_mut().zip(self.f.chunks_exact(2)) {
             *b = (a[0] | a[1] << 4) as u8;
+        }
+    }
+
+    fn pack_simple_uninit_4bit(&self, z: &mut [MaybeUninit<u8>; Self::packed_bytesize(4)]) {
+        for (b, a) in z.iter_mut().zip(self.f.chunks_exact(2)) {
+            b.write((a[0] | a[1] << 4) as u8);
         }
     }
 
@@ -1281,12 +1421,6 @@ impl Poly {
 
         Self {
             f: unsafe { transmute::<[MaybeUninit<i32>; N], [i32; N]>(f) },
-        }
-    }
-
-    fn use_hint(&mut self, h: &Poly, gamma2: i32) {
-        for (i, a) in self.f.iter_mut().enumerate() {
-            *a = coeff::use_hint(h.f[i] as usize, *a, gamma2)
         }
     }
 }
@@ -1501,7 +1635,7 @@ impl<const K: usize> PolyVec<K> {
         }
     }
 
-    fn hint_bitunpack(y: &[u8], omega: usize) -> Option<PolyVec<K>> {
+    fn hint_bitunpack(y: &[u8], omega: usize) -> Result<PolyVec<K>, VerifyError> {
         let mut h = PolyVec::zero();
 
         let mut idx = 0;
@@ -1510,7 +1644,7 @@ impl<const K: usize> PolyVec<K> {
             let num_hints = y[omega + i] as usize;
 
             if num_hints < idx || num_hints > omega {
-                return None;
+                return Err(VerifyError::TooManyHints);
             }
 
             h.v[i].f[y[idx] as usize] = 1;
@@ -1518,7 +1652,7 @@ impl<const K: usize> PolyVec<K> {
 
             while idx < num_hints {
                 if y[idx - 1] >= y[idx] {
-                    return None;
+                    return Err(VerifyError::TooManyHints);
                 }
 
                 h.v[i].f[y[idx] as usize] = 1;
@@ -1527,10 +1661,10 @@ impl<const K: usize> PolyVec<K> {
         }
 
         if y[idx..omega].iter().any(|x| *x != 0) {
-            return None;
+            return Err(VerifyError::TooManyHints);
         }
 
-        Some(h)
+        Ok(h)
     }
 
     fn bitpack_2pow17(&self, dst: &mut [u8]) {
@@ -1605,12 +1739,6 @@ impl<const K: usize> PolyVec<K> {
 
         Self {
             v: unsafe { transmute_copy(&v) },
-        }
-    }
-
-    fn use_hint(&mut self, h: &Self, gamma2: i32) {
-        for (i, poly) in self.v.iter_mut().enumerate() {
-            poly.use_hint(&h.v[i], gamma2)
         }
     }
 }
@@ -1839,21 +1967,50 @@ mod tests {
                 "ML-DSA-44" => {
                     let pk = mldsa44::PublicKey::decode(&tg.pk);
 
-                    for test in tg.tests.iter().filter(|t| t.test_passed) {
+                    for test in tg.tests.iter() {
                         match pk.verify_internal(&test.message, &test.signature) {
                             Ok(_) => assert!(test.test_passed),
                             Err(VerifyError::ZoutOfBound) => assert_eq!(test.reason, "z too large"),
                             Err(VerifyError::Mismatch) => {
-                                assert_eq!(test.reason, "modify signature")
+                                assert!(!test.test_passed)
+                            }
+                            Err(VerifyError::TooManyHints) => {
+                                assert_eq!(test.reason, "too many hints")
                             }
                         }
                     }
                 }
                 "ML-DSA-65" => {
-                    continue;
+                    let pk = mldsa65::PublicKey::decode(&tg.pk);
+
+                    for test in tg.tests.iter() {
+                        match pk.verify_internal(&test.message, &test.signature) {
+                            Ok(_) => assert!(test.test_passed),
+                            Err(VerifyError::ZoutOfBound) => assert_eq!(test.reason, "z too large"),
+                            Err(VerifyError::Mismatch) => {
+                                assert!(!test.test_passed)
+                            }
+                            Err(VerifyError::TooManyHints) => {
+                                assert_eq!(test.reason, "too many hints")
+                            }
+                        }
+                    }
                 }
                 "ML-DSA-87" => {
-                    continue;
+                    let pk = mldsa87::PublicKey::decode(&tg.pk);
+
+                    for test in tg.tests.iter() {
+                        match pk.verify_internal(&test.message, &test.signature) {
+                            Ok(_) => assert!(test.test_passed),
+                            Err(VerifyError::ZoutOfBound) => assert_eq!(test.reason, "z too large"),
+                            Err(VerifyError::Mismatch) => {
+                                assert!(!test.test_passed)
+                            }
+                            Err(VerifyError::TooManyHints) => {
+                                assert_eq!(test.reason, "too many hints")
+                            }
+                        }
+                    }
                 }
                 _ => panic!("invalid paramter set"),
             };
