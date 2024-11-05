@@ -21,12 +21,3 @@ Only supports Kyber768.
 ## ML-DSA (Dilithium)
 
 Implementation of [FIPS 204](https://csrc.nist.gov/pubs/fips/204/final).
-
-### Status
-
-- [x] Key generation
-- [x] Key encoding
-- [x] Key decoding
-- [x] Signing
-- [ ] Verification
-- [x] Multiple parameter sets
