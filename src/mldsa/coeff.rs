@@ -84,6 +84,32 @@ pub const fn decompose_88(mut r: i32) -> (i32, i32) {
     (r1, r0)
 }
 
+pub const fn use_hint_88(h: usize, r: i32) -> i32 {
+    let (mut r1, r0) = decompose_88(r);
+
+    if h == 0 {
+        return r1;
+    }
+
+    r1 += 1 - (((r0 >> 31) & 1) << 1);
+    r1 -= ((r1 + (1 << 5)) >> 6) * 44;
+    r1 + ((r1 >> 31) & 44)
+}
+
+pub const fn use_hint_32(h: usize, r: i32) -> i32 {
+    let (r1, r0) = decompose_32(r);
+
+    if h == 0 {
+        return r1;
+    }
+
+    if r0 > 0 {
+        (r1 + 1) & 15
+    } else {
+        (r1 - 1) & 15
+    }
+}
+
 pub const fn make_hint<const G2: i32>(z: i32, r: i32) -> i32 {
     (z > G2 || z < -G2 || (z == -G2 && r != 0)) as i32
 }
