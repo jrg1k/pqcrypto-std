@@ -331,7 +331,7 @@ pub mod mldsa44 {
 
                 let count = hint.make_hint::<{ GAMMA2 as i32 }>(&w0, &w1);
 
-                if count > OMEGA {
+                if count >= OMEGA {
                     continue;
                 }
 
@@ -507,7 +507,7 @@ pub mod mldsa65 {
 
                 let count = hint.make_hint::<{ GAMMA2 as i32 }>(&w0, &w1);
 
-                if count > OMEGA {
+                if count >= OMEGA {
                     continue;
                 }
 
@@ -684,7 +684,7 @@ pub mod mldsa87 {
 
                 let count = hint.make_hint::<{ GAMMA2 as i32 }>(&w0, &w1);
 
-                if count > OMEGA {
+                if count >= OMEGA {
                     continue;
                 }
 
