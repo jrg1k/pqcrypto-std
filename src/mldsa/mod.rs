@@ -1294,17 +1294,21 @@ impl<const K: usize> PolyVec<K> {
                 return Err(VerifyError::TooManyHints);
             }
 
+            if idx >= num_hints {
+                continue;
+            }
+
             h.v[i].f[y[idx] as usize] = 1;
             idx += 1;
 
-            while idx < num_hints {
-                if y[idx - 1] >= y[idx] {
+            for j in idx..num_hints {
+                if y[idx - 1] >= y[j] {
                     return Err(VerifyError::TooManyHints);
                 }
 
-                h.v[i].f[y[idx] as usize] = 1;
-                idx += 1;
+                h.v[i].f[y[j] as usize] = 1;
             }
+            idx = num_hints;
         }
 
         if y[idx..omega].iter().any(|x| *x != 0) {
