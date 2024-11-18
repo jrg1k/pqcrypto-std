@@ -1437,8 +1437,8 @@ impl Poly {
         for i in 0..N {
             let h = coeff::make_hint::<G2>(p0.f[i], p1.f[i]);
 
-            self.f[i] = h;
-            sum += h as usize;
+            self.f[i] = h as i32;
+            sum += h;
         }
 
         sum

@@ -110,8 +110,8 @@ pub const fn use_hint_32(h: usize, r: i32) -> i32 {
     }
 }
 
-pub const fn make_hint<const G2: i32>(z: i32, r: i32) -> i32 {
-    (z > G2 || z < -G2 || (z == -G2 && r != 0)) as i32
+pub const fn make_hint<const G2: i32>(z: i32, r: i32) -> usize {
+    (z > G2 || z < -G2 || (z == -G2 && r != 0)) as usize
 }
 
 pub const fn norm(w: i32) -> usize {
