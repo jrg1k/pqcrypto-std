@@ -6,6 +6,7 @@ use core::{
     ops::{AddAssign, Mul, MulAssign, SubAssign},
 };
 use rand_core::CryptoRngCore;
+use thiserror::Error;
 use zeroize::Zeroize;
 
 use crate::hash;
@@ -54,24 +55,18 @@ trait SignerInternal {
     fn sign_internal(&self, dst: &mut [u8], m: &[u8], rnd: &[u8; 32]);
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum VerifyError {
+    #[error("z is out of bound")]
     ZoutOfBound,
+
+    #[error("signature mismatch")]
     Mismatch,
+
+    #[error("too many hints in signature")]
     TooManyHints,
 }
 
-impl core::fmt::Display for VerifyError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            VerifyError::ZoutOfBound => f.write_str("z is out of bound"),
-            VerifyError::Mismatch => f.write_str("signature mismatch"),
-            VerifyError::TooManyHints => f.write_str("too many hints in signature"),
-        }
-    }
-}
-
-impl core::error::Error for VerifyError {}
 
 trait VerifierInternal<
     const K: usize,
