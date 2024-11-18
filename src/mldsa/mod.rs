@@ -249,7 +249,7 @@ trait VerifyingKeyInternal<
         let (z_bytes, sig) = sig.split_first_chunk::<Z_BYTES>().unwrap();
         let h_bytes: &[u8; H_BYTES] = sig.try_into().unwrap();
 
-        let hint: PolyVec<K> = PolyVec::hint_bitunpack(h_bytes, Self::OMEGA)?;
+        let hint = PolyVec::hint_bitunpack(h_bytes, Self::OMEGA)?;
 
         let mut z_hat = Self::bitunpack_z_hat(z_bytes);
 
