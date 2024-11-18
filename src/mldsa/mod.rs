@@ -361,7 +361,7 @@ pub trait SigningKey<
 >
 {
     /// Sign message `m` using randomness from `rng`.
-    fn sign(&self, sig: &mut [u8], rng: &mut impl CryptoRngCore, m: impl AsRef<[u8]>);
+    fn sign(&self, sig: &mut [u8], rng: &mut impl CryptoRngCore, m: &[u8]);
     fn encode(&self, dst: &mut [u8]);
     fn decode(src: &[u8]) -> Self;
 
@@ -386,7 +386,7 @@ impl<
 where
     T: SigningKeyInternal<K, L, ETA, TAU, GAMMA1, GAMMA2, BETA, OMEGA, CT_BYTES, W1_BYTES, Z_BYTES>,
 {
-    fn sign(&self, sig: &mut [u8], rng: &mut impl CryptoRngCore, m: impl AsRef<[u8]>) {
+    fn sign(&self, sig: &mut [u8], rng: &mut impl CryptoRngCore, m: &[u8]) {
         let mut rnd = [0u8; 32];
         rng.fill_bytes(&mut rnd);
 
