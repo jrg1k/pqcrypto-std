@@ -1449,10 +1449,42 @@ fn expand_s<const K: usize, const L: usize, const ETA: usize>(
 
 #[cfg(test)]
 mod tests {
+    use rand::RngCore;
+    use rand_core::OsRng;
     use serde::Deserialize;
     use std::{fs::read_to_string, path::PathBuf};
 
     use super::*;
+
+    #[test]
+    fn test_gen_sign_verify() {
+        let mut pk = [0u8; mldsa44::PUBKEY_SIZE];
+        let sk = mldsa44::PrivateKey::keygen(&mut pk, &mut OsRng);
+        let vk = mldsa44::PublicKey::decode(&pk);
+        let mut token = [0u8; 32];
+        OsRng.fill_bytes(&mut token);
+        let mut sig = [0u8; mldsa44::SIG_SIZE];
+        sk.sign(&mut sig, &mut OsRng, &token);
+        vk.verify(&token, &sig).unwrap();
+
+        let mut pk = [0u8; mldsa65::PUBKEY_SIZE];
+        let sk = mldsa65::PrivateKey::keygen(&mut pk, &mut OsRng);
+        let vk = mldsa65::PublicKey::decode(&pk);
+        let mut token = [0u8; 32];
+        OsRng.fill_bytes(&mut token);
+        let mut sig = [0u8; mldsa65::SIG_SIZE];
+        sk.sign(&mut sig, &mut OsRng, &token);
+        vk.verify(&token, &sig).unwrap();
+
+        let mut pk = [0u8; mldsa87::PUBKEY_SIZE];
+        let sk = mldsa87::PrivateKey::keygen(&mut pk, &mut OsRng);
+        let vk = mldsa87::PublicKey::decode(&pk);
+        let mut token = [0u8; 32];
+        OsRng.fill_bytes(&mut token);
+        let mut sig = [0u8; mldsa87::SIG_SIZE];
+        sk.sign(&mut sig, &mut OsRng, &token);
+        vk.verify(&token, &sig).unwrap();
+    }
 
     #[test]
     fn test_keygen() {
