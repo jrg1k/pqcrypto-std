@@ -53,7 +53,7 @@ impl SigningKeyInternal<K, L, ETA, TAU, GAMMA1, GAMMA2, BETA, OMEGA, CT_BYTES, W
         pvec.expand_mask_2pow19(rho, mu, h);
     }
 
-    fn bitpack_z(pvec: &PolyVec<L>, dst: &mut [u8]) {
+    fn bitpack_z(pvec: &PolyVec<L>, dst: &mut [u8; Z_BYTES]) {
         pvec.bitpack_2pow19(dst);
     }
 

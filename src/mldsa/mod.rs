@@ -70,7 +70,7 @@ trait SigningKeyInternal<
 {
     fn privkey(&self) -> &PrivateKey<K, L, ETA>;
     fn expand_mask(pvec: &mut PolyVec<L>, rho: &[u8; 64], mu: usize, h: &mut hash::Shake256);
-    fn bitpack_z(pvec: &PolyVec<L>, dst: &mut [u8]);
+    fn bitpack_z(pvec: &PolyVec<L>, dst: &mut [u8; Z_BYTES]);
     fn pack_simple(w1: &PolyVec<K>, z: &mut [u8; W1_BYTES]);
     fn decompose(x: &PolyVec<K>, x0: &mut PolyVec<K>, x1: &mut PolyVec<K>);
 
@@ -152,9 +152,11 @@ trait SigningKeyInternal<
             break;
         }
 
-        Self::bitpack_z(&z, &mut dst[CT_BYTES..]);
+        let (z_buf, buf) = dst[CT_BYTES..].split_first_chunk_mut().unwrap();
 
-        hint.hint_bitpack::<OMEGA>(&mut dst[CT_BYTES + Z_BYTES..]);
+        Self::bitpack_z(&z, z_buf);
+
+        hint.hint_bitpack::<OMEGA>(buf);
     }
 
     fn keygen_internal(vk: &mut [u8], ksi: &[u8; 32]) -> Self {
