@@ -67,8 +67,7 @@ pub enum VerifyError {
     TooManyHints,
 }
 
-
-trait VerifierInternal<
+trait VerifyingKeyInternal<
     const K: usize,
     const L: usize,
     const CT_BYTES: usize,
@@ -147,7 +146,7 @@ trait VerifierInternal<
     }
 }
 
-pub trait Verifier<
+pub trait VerifyingKey<
     const K: usize,
     const L: usize,
     const CT_BYTES: usize,
@@ -157,7 +156,9 @@ pub trait Verifier<
     const SIG_SIZE: usize,
 >
 {
-    fn verify(&self, m: impl AsRef<[u8]>, sig: &[u8; SIG_SIZE]) -> Result<(), VerifyError>;
+    fn verify(&self, m: &[u8], sig: &[u8]) -> Result<(), VerifyError>;
+    fn encode(&self, dst: &mut [u8]);
+    fn decode(src: &[u8]) -> Self;
 }
 
 impl<
@@ -169,12 +170,25 @@ impl<
         const H_BYTES: usize,
         const W1_BYTES: usize,
         const SIG_SIZE: usize,
-    > Verifier<K, L, CT_BYTES, Z_BYTES, H_BYTES, W1_BYTES, SIG_SIZE> for T
+    > VerifyingKey<K, L, CT_BYTES, Z_BYTES, H_BYTES, W1_BYTES, SIG_SIZE> for T
 where
-    T: VerifierInternal<K, L, CT_BYTES, Z_BYTES, H_BYTES, W1_BYTES, SIG_SIZE>,
+    T: VerifyingKeyInternal<K, L, CT_BYTES, Z_BYTES, H_BYTES, W1_BYTES, SIG_SIZE>
+        + From<PublicKey<K, L>>,
 {
-    fn verify(&self, m: impl AsRef<[u8]>, sig: &[u8; SIG_SIZE]) -> Result<(), VerifyError> {
-        self.verify_internal(m.as_ref(), sig)
+    fn verify(&self, m: &[u8], sig: &[u8]) -> Result<(), VerifyError> {
+        assert!(sig.len() >= SIG_SIZE);
+        self.verify_internal(m, sig.first_chunk().unwrap())
+    }
+
+    fn encode(&self, dst: &mut [u8]) {
+        assert!(dst.len() >= vk_size(K));
+        let key = self.pk();
+        vk_encode(&mut dst[..vk_size(K)], &key.rho, &key.t1)
+    }
+
+    fn decode(src: &[u8]) -> Self {
+        assert!(src.len() >= vk_size(K));
+        PublicKey::decode(src).into()
     }
 }
 
@@ -221,7 +235,7 @@ pub mod mldsa44 {
     use crate::hash;
 
     use super::{
-        bitlen, coeff, sig_size, sk_size, vk_size, Poly, PolyVec, SignerInternal, VerifierInternal,
+        bitlen, coeff, sig_size, sk_size, vk_size, Poly, PolyVec, SignerInternal, VerifyingKeyInternal,
         Q,
     };
 
@@ -251,9 +265,6 @@ pub mod mldsa44 {
 
     /// Private key used for signing.
     pub type PrivateKey = super::PrivateKey<K, L, ETA>;
-
-    /// Public Key used for verifying.
-    pub type PublicKey = super::PublicKey<K, L>;
 
     impl SignerInternal for PrivateKey {
         fn sign_internal(&self, dst: &mut [u8], m: &[u8], rnd: &[u8; 32]) {
@@ -339,7 +350,11 @@ pub mod mldsa44 {
         }
     }
 
-    impl VerifierInternal<K, L, CT_BYTES, Z_BYTES, H_BYTES, W1_BYTES, SIG_SIZE> for PublicKey {
+    pub struct PublicKey {
+        key: super::PublicKey<K, L>,
+    }
+
+    impl VerifyingKeyInternal<K, L, CT_BYTES, Z_BYTES, H_BYTES, W1_BYTES, SIG_SIZE> for PublicKey {
         const OMEGA: usize = OMEGA;
 
         const TAU: usize = TAU;
@@ -385,7 +400,13 @@ pub mod mldsa44 {
         }
 
         fn pk(&self) -> &super::PublicKey<K, L> {
-            self
+            &self.key
+        }
+    }
+
+    impl From<super::PublicKey<K, L>> for PublicKey {
+        fn from(key: super::PublicKey<K, L>) -> Self {
+            Self { key }
         }
     }
 }
@@ -397,7 +418,7 @@ pub mod mldsa65 {
     use crate::hash;
 
     use super::{
-        bitlen, coeff, sig_size, sk_size, vk_size, Poly, PolyVec, SignerInternal, VerifierInternal,
+        bitlen, coeff, sig_size, sk_size, vk_size, Poly, PolyVec, SignerInternal, VerifyingKeyInternal,
         Q,
     };
 
@@ -429,7 +450,9 @@ pub mod mldsa65 {
     pub type PrivateKey = super::PrivateKey<K, L, ETA>;
 
     /// Public Key used for verifying.
-    pub type PublicKey = super::PublicKey<K, L>;
+    pub struct PublicKey {
+        key: super::PublicKey<K, L>,
+    }
 
     impl SignerInternal for PrivateKey {
         fn sign_internal(&self, dst: &mut [u8], m: &[u8], rnd: &[u8; 32]) {
@@ -515,7 +538,7 @@ pub mod mldsa65 {
         }
     }
 
-    impl VerifierInternal<K, L, CT_BYTES, Z_BYTES, H_BYTES, W1_BYTES, SIG_SIZE> for PublicKey {
+    impl VerifyingKeyInternal<K, L, CT_BYTES, Z_BYTES, H_BYTES, W1_BYTES, SIG_SIZE> for PublicKey {
         const OMEGA: usize = OMEGA;
 
         const TAU: usize = TAU;
@@ -560,8 +583,14 @@ pub mod mldsa65 {
             }
         }
 
-        fn pk(&self) -> &PublicKey {
-            self
+        fn pk(&self) -> &super::PublicKey<K, L> {
+            &self.key
+        }
+    }
+
+    impl From<super::PublicKey<K, L>> for PublicKey {
+        fn from(key: super::PublicKey<K, L>) -> Self {
+            Self { key }
         }
     }
 }
@@ -574,7 +603,7 @@ pub mod mldsa87 {
     use crate::hash;
 
     use super::{
-        bitlen, coeff, sig_size, sk_size, vk_size, Poly, PolyVec, SignerInternal, VerifierInternal,
+        bitlen, coeff, sig_size, sk_size, vk_size, Poly, PolyVec, SignerInternal, VerifyingKeyInternal,
         Q,
     };
 
@@ -606,7 +635,9 @@ pub mod mldsa87 {
     pub type PrivateKey = super::PrivateKey<K, L, ETA>;
 
     /// Public Key used for verifying.
-    pub type PublicKey = super::PublicKey<K, L>;
+    pub struct PublicKey {
+        key: super::PublicKey<K, L>,
+    }
 
     impl SignerInternal for PrivateKey {
         fn sign_internal(&self, dst: &mut [u8], m: &[u8], rnd: &[u8; 32]) {
@@ -692,7 +723,7 @@ pub mod mldsa87 {
         }
     }
 
-    impl VerifierInternal<K, L, CT_BYTES, Z_BYTES, H_BYTES, W1_BYTES, SIG_SIZE> for PublicKey {
+    impl VerifyingKeyInternal<K, L, CT_BYTES, Z_BYTES, H_BYTES, W1_BYTES, SIG_SIZE> for PublicKey {
         const OMEGA: usize = OMEGA;
 
         const TAU: usize = TAU;
@@ -737,8 +768,14 @@ pub mod mldsa87 {
             }
         }
 
-        fn pk(&self) -> &PublicKey {
-            self
+        fn pk(&self) -> &super::PublicKey<K, L> {
+            &self.key
+        }
+    }
+
+    impl From<super::PublicKey<K, L>> for PublicKey {
+        fn from(key: super::PublicKey<K, L>) -> Self {
+            Self { key }
         }
     }
 }
@@ -754,7 +791,7 @@ fn vk_encode<const K: usize>(dst: &mut [u8], rho: &[u8; 32], t1: &PolyVec<K>) {
 }
 
 /// Public key used for verifying.
-pub struct PublicKey<const K: usize, const L: usize> {
+struct PublicKey<const K: usize, const L: usize> {
     rho: [u8; 32],
     tr: [u8; 64],
     t1: PolyVec<K>,
@@ -762,13 +799,8 @@ pub struct PublicKey<const K: usize, const L: usize> {
 }
 
 impl<const K: usize, const L: usize> PublicKey<K, L> {
-    /// Encode public key as bytes.
-    pub fn encode(&self, dst: &mut [u8]) {
-        vk_encode(dst, &self.rho, &self.t1)
-    }
-
     /// Decode public key from bytes.
-    pub fn decode(pk: &[u8]) -> Self {
+    fn decode(pk: &[u8]) -> Self {
         let rho = array::from_fn(|i| pk[i]);
         let mut t1 = PolyVec::zero();
 
@@ -1825,9 +1857,8 @@ fn expand_s<const K: usize, const L: usize, const ETA: usize>(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::read_to_string, path::PathBuf};
-
     use serde::Deserialize;
+    use std::{fs::read_to_string, path::PathBuf};
 
     use super::*;
 
