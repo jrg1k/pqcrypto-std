@@ -1,5 +1,6 @@
 //! Implementation of ML-DSA (FIPS-204).
 
+use crate::hash;
 use core::{
     array,
     mem::{transmute, transmute_copy, MaybeUninit},
@@ -9,7 +10,9 @@ use rand_core::CryptoRngCore;
 use thiserror::Error;
 use zeroize::Zeroize;
 
-use crate::hash;
+pub mod mldsa44;
+pub mod mldsa65;
+pub mod mldsa87;
 
 mod coeff;
 mod reduce;
@@ -51,8 +54,156 @@ const ZETAS: [i32; N] = {
     zetas_bitrev
 };
 
-trait SignerInternal {
-    fn sign_internal(&self, dst: &mut [u8], m: &[u8], rnd: &[u8; 32]);
+trait SigningKeyInternal<
+    const K: usize,
+    const L: usize,
+    const ETA: usize,
+    const TAU: usize,
+    const GAMMA1: usize,
+    const GAMMA2: usize,
+    const BETA: usize,
+    const OMEGA: usize,
+    const CT_BYTES: usize,
+    const W1_BYTES: usize,
+    const Z_BYTES: usize,
+>: From<PrivateKey<K, L, ETA>>
+{
+    fn privkey(&self) -> &PrivateKey<K, L, ETA>;
+    fn expand_mask(pvec: &mut PolyVec<L>, rho: &[u8; 64], mu: usize, h: &mut hash::Shake256);
+    fn bitpack_z(pvec: &PolyVec<L>, dst: &mut [u8]);
+    fn pack_simple(w1: &PolyVec<K>, z: &mut [u8; W1_BYTES]);
+    fn decompose(x: &PolyVec<K>, x0: &mut PolyVec<K>, x1: &mut PolyVec<K>);
+
+    fn sign_internal(&self, dst: &mut [u8], m: &[u8], rnd: &[u8; 32]) {
+        let (c_tilde, buf) = dst.split_first_chunk_mut::<CT_BYTES>().unwrap();
+        let (w1_bytes, buf) = buf.split_first_chunk_mut::<W1_BYTES>().unwrap();
+        let (mu, buf) = buf.split_first_chunk_mut::<64>().unwrap();
+        let rho_prime2: &mut [u8; 64] = buf.first_chunk_mut().unwrap();
+
+        let mut h = hash::Shake256::init();
+        let privkey = self.privkey();
+
+        h.absorb_and_squeeze(mu, &[&privkey.tr, m]);
+
+        h.absorb_and_squeeze(rho_prime2, &[&privkey.k, rnd, mu]);
+
+        let mut y = PolyVec::zero();
+        let mut y_hat = PolyVec::zero();
+        let mut w = PolyVec::zero();
+        let mut w1 = PolyVec::zero();
+        let mut w0 = PolyVec::zero();
+        let mut z = PolyVec::zero();
+        let mut hint = PolyVec::zero();
+        let mut c_hat = Poly::zero();
+
+        for nonce in (0..).step_by(L) {
+            Self::expand_mask(&mut y, rho_prime2, nonce, &mut h);
+
+            y_hat.ntt(&y);
+
+            w.multiply_matvec_ntt(&privkey.a_hat, &y_hat);
+            w.reduce_invntt_tomont_inplace();
+
+            Self::decompose(&w, &mut w0, &mut w1);
+            Self::pack_simple(&w1, w1_bytes);
+            h.absorb_and_squeeze(c_tilde, &[mu, w1_bytes]);
+
+            h.absorb(c_tilde);
+            h.finalize();
+            c_hat.f.fill(0);
+            c_hat.sample_in_ball(&mut h, TAU);
+            h.reset();
+            c_hat.ntt_inplace();
+
+            z.multiply_poly_ntt(&c_hat, &privkey.s1_hat);
+            z.invntt_tomont_inplace();
+            z += &y;
+            z.reduce();
+
+            if !z.norm_in_bound(GAMMA1 - BETA) {
+                continue;
+            }
+
+            hint.multiply_poly_ntt(&c_hat, &privkey.s2_hat);
+            hint.invntt_tomont_inplace();
+            w0 -= &hint;
+            w0.reduce();
+
+            if !w0.norm_in_bound(GAMMA2 - BETA) {
+                continue;
+            }
+
+            hint.multiply_poly_ntt(&c_hat, &privkey.t0_hat);
+            hint.invntt_tomont_inplace();
+            hint.reduce();
+
+            if !hint.norm_in_bound(GAMMA2) {
+                continue;
+            }
+
+            w0 += &hint;
+
+            let count = hint.make_hint(&w0, &w1, GAMMA2);
+
+            if count >= OMEGA {
+                continue;
+            }
+
+            break;
+        }
+
+        Self::bitpack_z(&z, &mut dst[CT_BYTES..]);
+
+        hint.hint_bitpack::<OMEGA>(&mut dst[CT_BYTES + Z_BYTES..]);
+    }
+
+    fn keygen_internal(vk: &mut [u8], ksi: &[u8; 32]) -> Self {
+        let mut h = hash::Shake256::init();
+        h.absorb_multi(&[ksi, &[K as u8], &[L as u8]]);
+        let rho: [u8; 32] = h.squeeze_array();
+        let rho_prime: [u8; 64] = h.squeeze_array();
+        let k: [u8; 32] = h.squeeze_array();
+
+        let mut s1_hat = PolyVec::zero();
+        let mut s2_hat = PolyVec::zero();
+        let mut t0_hat = PolyVec::zero();
+        let a_hat = PolyMat::expand_a(&rho);
+
+        expand_s::<K, L, ETA>(&mut s1_hat, &mut s2_hat, &rho_prime);
+
+        s1_hat.ntt_inplace();
+
+        let mut t = PolyVec::zero();
+        let mut t1 = PolyVec::zero();
+
+        t.multiply_matvec_ntt(&a_hat, &s1_hat);
+        t.reduce_invntt_tomont_inplace();
+
+        t += &s2_hat;
+
+        t.power2round(&mut t1, &mut t0_hat);
+
+        vk_encode(vk, &rho, &t1);
+
+        h.reset();
+        h.absorb(vk);
+        h.finalize();
+        let tr: [u8; 64] = h.squeeze_array();
+
+        s2_hat.ntt_inplace();
+        t0_hat.ntt_inplace();
+
+        PrivateKey {
+            rho,
+            k,
+            tr,
+            s1_hat,
+            s2_hat,
+            t0_hat,
+            a_hat,
+        }
+        .into()
+    }
 }
 
 #[derive(Debug, Error)]
@@ -181,38 +332,95 @@ where
     }
 
     fn encode(&self, dst: &mut [u8]) {
-        assert!(dst.len() >= vk_size(K));
+        assert!(dst.len() >= pubkey_size(K));
         let key = self.pk();
-        vk_encode(&mut dst[..vk_size(K)], &key.rho, &key.t1)
+        vk_encode(&mut dst[..pubkey_size(K)], &key.rho, &key.t1)
     }
 
     fn decode(src: &[u8]) -> Self {
-        assert!(src.len() >= vk_size(K));
+        assert!(src.len() >= pubkey_size(K));
         PublicKey::decode(src).into()
     }
 }
 
 /// Signatory in ML-DSA.
-pub trait Signer {
+pub trait SigningKey<
+    const K: usize,
+    const L: usize,
+    const ETA: usize,
+    const TAU: usize,
+    const GAMMA1: usize,
+    const GAMMA2: usize,
+    const BETA: usize,
+    const OMEGA: usize,
+    const CT_BYTES: usize,
+    const W1_BYTES: usize,
+    const Z_BYTES: usize,
+>
+{
     /// Sign message `m` using randomness from `rng`.
     fn sign(&self, sig: &mut [u8], rng: &mut impl CryptoRngCore, m: impl AsRef<[u8]>);
+    fn encode(&self, dst: &mut [u8]);
+    fn decode(src: &[u8]) -> Self;
+
+    /// Private key generation.
+    fn keygen(vk: &mut [u8], rng: &mut impl CryptoRngCore) -> Self;
 }
 
-impl<T: SignerInternal> Signer for T {
-    #[inline]
+impl<
+        T,
+        const K: usize,
+        const L: usize,
+        const ETA: usize,
+        const TAU: usize,
+        const GAMMA1: usize,
+        const GAMMA2: usize,
+        const BETA: usize,
+        const OMEGA: usize,
+        const CT_BYTES: usize,
+        const W1_BYTES: usize,
+        const Z_BYTES: usize,
+    > SigningKey<K, L, ETA, TAU, GAMMA1, GAMMA2, BETA, OMEGA, CT_BYTES, W1_BYTES, Z_BYTES> for T
+where
+    T: SigningKeyInternal<K, L, ETA, TAU, GAMMA1, GAMMA2, BETA, OMEGA, CT_BYTES, W1_BYTES, Z_BYTES>,
+{
     fn sign(&self, sig: &mut [u8], rng: &mut impl CryptoRngCore, m: impl AsRef<[u8]>) {
         let mut rnd = [0u8; 32];
         rng.fill_bytes(&mut rnd);
 
         self.sign_internal(sig, m.as_ref(), &rnd)
     }
+
+    fn encode(&self, dst: &mut [u8]) {
+        assert!(dst.len() >= privkey_size(K, L, ETA));
+        self.privkey().encode(dst);
+    }
+
+    fn decode(src: &[u8]) -> Self {
+        assert!(src.len() >= privkey_size(K, L, ETA));
+        PrivateKey::decode(src).into()
+    }
+
+    /// Private key generation.
+    fn keygen(pk: &mut [u8], rng: &mut impl CryptoRngCore) -> Self {
+        debug_assert!(pk.len() >= pubkey_size(K));
+
+        let mut ksi = [0u8; 32];
+        rng.fill_bytes(&mut ksi);
+
+        let sk = Self::keygen_internal(pk, &ksi);
+
+        ksi.zeroize();
+
+        sk
+    }
 }
 
-const fn vk_size(k: usize) -> usize {
+const fn pubkey_size(k: usize) -> usize {
     k * Poly::PACKED_10BIT + 32
 }
 
-const fn sk_size(k: usize, l: usize, eta: usize) -> usize {
+const fn privkey_size(k: usize, l: usize, eta: usize) -> usize {
     match eta {
         2 => 32 + 32 + 64 + l * Poly::PACKED_3BIT + k * (Poly::PACKED_3BIT + Poly::PACKED_13BIT),
         4 => 32 + 32 + 64 + l * Poly::PACKED_4BIT + k * (Poly::PACKED_4BIT + Poly::PACKED_13BIT),
@@ -226,558 +434,6 @@ const fn bitlen(n: usize) -> usize {
 
 const fn sig_size(k: usize, l: usize, lambda: usize, gamma1: usize, omega: usize) -> usize {
     lambda / 4 + l * 32 * (1 + bitlen(gamma1 - 1)) + omega + k
-}
-
-pub mod mldsa44 {
-    //! ML-DSA-44 parameter set.
-    use core::mem::{transmute, MaybeUninit};
-
-    use crate::hash;
-
-    use super::{
-        bitlen, coeff, sig_size, sk_size, vk_size, Poly, PolyVec, SignerInternal, VerifyingKeyInternal,
-        Q,
-    };
-
-    const K: usize = 4;
-    const L: usize = 4;
-    const ETA: usize = 2;
-    const GAMMA1: usize = 1 << 17;
-    const GAMMA2: usize = (Q as usize - 1) / 88;
-    const LAMBDA: usize = 128;
-    const TAU: usize = 39;
-    const BETA: usize = TAU * ETA;
-    const OMEGA: usize = 80;
-
-    const CT_BYTES: usize = LAMBDA / 4;
-    const Z_BYTES: usize = L * 32 * (1 + bitlen(GAMMA1 - 1));
-    const H_BYTES: usize = OMEGA + K;
-    const W1_BYTES: usize = K * 32 * bitlen((Q as usize - 1) / (2 * GAMMA2) - 1);
-
-    /// Public key bytesize.
-    pub const PUBKEY_SIZE: usize = vk_size(K);
-
-    /// Private key bytesize.
-    pub const PRIVKEY_SIZE: usize = sk_size(K, L, ETA);
-
-    /// Signature bytesize.
-    pub const SIG_SIZE: usize = sig_size(K, L, LAMBDA, GAMMA1, OMEGA);
-
-    /// Private key used for signing.
-    pub type PrivateKey = super::PrivateKey<K, L, ETA>;
-
-    impl SignerInternal for PrivateKey {
-        fn sign_internal(&self, dst: &mut [u8], m: &[u8], rnd: &[u8; 32]) {
-            let (c_tilde, buf) = dst.split_first_chunk_mut::<CT_BYTES>().unwrap();
-            let (w1_bytes, buf) = buf.split_first_chunk_mut::<W1_BYTES>().unwrap();
-            let (mu, buf) = buf.split_first_chunk_mut::<64>().unwrap();
-            let rho_prime2: &mut [u8; 64] = buf.first_chunk_mut().unwrap();
-
-            let mut h = hash::Shake256::init();
-
-            h.absorb_and_squeeze(mu, &[&self.tr, m]);
-
-            h.absorb_and_squeeze(rho_prime2, &[&self.k, rnd, mu]);
-
-            let mut y = PolyVec::zero();
-            let mut y_hat = PolyVec::zero();
-            let mut w = PolyVec::zero();
-            let mut w1 = PolyVec::zero();
-            let mut w0 = PolyVec::zero();
-            let mut z = PolyVec::zero();
-            let mut hint = PolyVec::zero();
-            let mut c_hat = Poly::zero();
-
-            for nonce in (0..).step_by(L) {
-                y.expand_mask_2pow17(rho_prime2, nonce, &mut h);
-
-                y_hat.ntt(&y);
-
-                w.multiply_matvec_ntt(&self.a_hat, &y_hat);
-                w.reduce_invntt_tomont_inplace();
-
-                w.decompose_88(&mut w0, &mut w1);
-                w1.pack_simple_6bit(w1_bytes);
-                h.absorb_and_squeeze(c_tilde, &[mu, w1_bytes]);
-
-                h.absorb(c_tilde);
-                h.finalize();
-                c_hat.f.fill(0);
-                c_hat.sample_in_ball(&mut h, TAU);
-                h.reset();
-                c_hat.ntt_inplace();
-
-                z.multiply_poly_ntt(&c_hat, &self.s1_hat);
-                z.invntt_tomont_inplace();
-                z += &y;
-                z.reduce();
-
-                if !z.norm_in_bound(GAMMA1 - BETA) {
-                    continue;
-                }
-
-                hint.multiply_poly_ntt(&c_hat, &self.s2_hat);
-                hint.invntt_tomont_inplace();
-                w0 -= &hint;
-                w0.reduce();
-
-                if !w0.norm_in_bound(GAMMA2 - BETA) {
-                    continue;
-                }
-
-                hint.multiply_poly_ntt(&c_hat, &self.t0_hat);
-                hint.invntt_tomont_inplace();
-                hint.reduce();
-
-                if !hint.norm_in_bound(GAMMA2) {
-                    continue;
-                }
-
-                w0 += &hint;
-
-                let count = hint.make_hint::<{ GAMMA2 as i32 }>(&w0, &w1);
-
-                if count >= OMEGA {
-                    continue;
-                }
-
-                break;
-            }
-
-            z.bitpack_2pow17(&mut dst[CT_BYTES..]);
-
-            hint.hint_bitpack::<OMEGA>(&mut dst[CT_BYTES + Z_BYTES..]);
-        }
-    }
-
-    pub struct PublicKey {
-        key: super::PublicKey<K, L>,
-    }
-
-    impl VerifyingKeyInternal<K, L, CT_BYTES, Z_BYTES, H_BYTES, W1_BYTES, SIG_SIZE> for PublicKey {
-        const OMEGA: usize = OMEGA;
-
-        const TAU: usize = TAU;
-
-        const GAMMA1: usize = GAMMA1;
-
-        const GAMMA2: usize = GAMMA2;
-
-        const BETA: usize = BETA;
-
-        fn bitunpack_z_hat(b: &[u8; Z_BYTES]) -> PolyVec<L> {
-            let mut pvec = PolyVec::zero();
-
-            for (poly, bytes) in pvec
-                .v
-                .iter_mut()
-                .zip(b.chunks_exact(Poly::packed_bytesize(18)))
-            {
-                poly.bitunpack_2pow17(bytes.try_into().unwrap());
-            }
-
-            pvec
-        }
-
-        fn w1encode(w1: &PolyVec<K>) -> [u8; W1_BYTES] {
-            let mut bytes = [const { MaybeUninit::uninit() }; W1_BYTES];
-            for (chunk, p) in bytes
-                .chunks_exact_mut(Poly::packed_bytesize(6))
-                .zip(w1.v.iter())
-            {
-                p.pack_simple_uninit_6bit(chunk.try_into().unwrap());
-            }
-
-            unsafe { transmute(bytes) }
-        }
-
-        fn use_hint(w1: &mut PolyVec<K>, h: &PolyVec<K>) {
-            for (i, poly) in w1.v.iter_mut().enumerate() {
-                for (j, a) in poly.f.iter_mut().enumerate() {
-                    *a = coeff::use_hint_88(h.v[i].f[j] as usize, *a);
-                }
-            }
-        }
-
-        fn pk(&self) -> &super::PublicKey<K, L> {
-            &self.key
-        }
-    }
-
-    impl From<super::PublicKey<K, L>> for PublicKey {
-        fn from(key: super::PublicKey<K, L>) -> Self {
-            Self { key }
-        }
-    }
-}
-
-pub mod mldsa65 {
-    //! ML-DSA-65 parameter set.
-    use core::mem::{transmute, MaybeUninit};
-
-    use crate::hash;
-
-    use super::{
-        bitlen, coeff, sig_size, sk_size, vk_size, Poly, PolyVec, SignerInternal, VerifyingKeyInternal,
-        Q,
-    };
-
-    const K: usize = 6;
-    const L: usize = 5;
-    const ETA: usize = 4;
-    const GAMMA1: usize = 1 << 19;
-    const GAMMA2: usize = (Q as usize - 1) / 32;
-    const LAMBDA: usize = 192;
-    const TAU: usize = 49;
-    const BETA: usize = TAU * ETA;
-    const OMEGA: usize = 55;
-
-    const CT_BYTES: usize = LAMBDA / 4;
-    const Z_BYTES: usize = L * 32 * (1 + bitlen(GAMMA1 - 1));
-    const H_BYTES: usize = OMEGA + K;
-    const W1_BYTES: usize = K * 32 * bitlen((Q as usize - 1) / (2 * GAMMA2) - 1);
-
-    /// Public key bytesize.
-    pub const PUBKEY_SIZE: usize = vk_size(K);
-
-    /// Private key bytesize.
-    pub const PRIVKEY_SIZE: usize = sk_size(K, L, ETA);
-
-    /// Signature bytesize.
-    pub const SIG_SIZE: usize = sig_size(K, L, LAMBDA, GAMMA1, OMEGA);
-
-    /// Private key used for signing.
-    pub type PrivateKey = super::PrivateKey<K, L, ETA>;
-
-    /// Public Key used for verifying.
-    pub struct PublicKey {
-        key: super::PublicKey<K, L>,
-    }
-
-    impl SignerInternal for PrivateKey {
-        fn sign_internal(&self, dst: &mut [u8], m: &[u8], rnd: &[u8; 32]) {
-            let (c_tilde, buf) = dst.split_first_chunk_mut::<CT_BYTES>().unwrap();
-            let (w1_bytes, buf) = buf.split_first_chunk_mut::<W1_BYTES>().unwrap();
-            let (mu, buf) = buf.split_first_chunk_mut::<64>().unwrap();
-            let rho_prime2: &mut [u8; 64] = buf.first_chunk_mut().unwrap();
-
-            let mut h = hash::Shake256::init();
-
-            h.absorb_and_squeeze(mu, &[&self.tr, m]);
-
-            h.absorb_and_squeeze(rho_prime2, &[&self.k, rnd, mu]);
-
-            let mut y = PolyVec::zero();
-            let mut y_hat = PolyVec::zero();
-            let mut w = PolyVec::zero();
-            let mut w1 = PolyVec::zero();
-            let mut w0 = PolyVec::zero();
-            let mut z = PolyVec::zero();
-            let mut hint = PolyVec::zero();
-            let mut c_hat = Poly::zero();
-
-            for nonce in (0..).step_by(L) {
-                y.expand_mask_2pow19(rho_prime2, nonce, &mut h);
-
-                y_hat.ntt(&y);
-
-                w.multiply_matvec_ntt(&self.a_hat, &y_hat);
-                w.reduce_invntt_tomont_inplace();
-
-                w.decompose_32(&mut w0, &mut w1);
-                w1.pack_simple_4bit(w1_bytes);
-                h.absorb_and_squeeze(c_tilde, &[mu, w1_bytes]);
-
-                h.absorb(c_tilde);
-                h.finalize();
-                c_hat.f.fill(0);
-                c_hat.sample_in_ball(&mut h, TAU);
-                h.reset();
-                c_hat.ntt_inplace();
-
-                z.multiply_poly_ntt(&c_hat, &self.s1_hat);
-                z.invntt_tomont_inplace();
-                z += &y;
-                z.reduce();
-
-                if !z.norm_in_bound(GAMMA1 - BETA) {
-                    continue;
-                }
-
-                hint.multiply_poly_ntt(&c_hat, &self.s2_hat);
-                hint.invntt_tomont_inplace();
-                w0 -= &hint;
-                w0.reduce();
-
-                if !w0.norm_in_bound(GAMMA2 - BETA) {
-                    continue;
-                }
-
-                hint.multiply_poly_ntt(&c_hat, &self.t0_hat);
-                hint.invntt_tomont_inplace();
-                hint.reduce();
-
-                if !hint.norm_in_bound(GAMMA2) {
-                    continue;
-                }
-
-                w0 += &hint;
-
-                let count = hint.make_hint::<{ GAMMA2 as i32 }>(&w0, &w1);
-
-                if count >= OMEGA {
-                    continue;
-                }
-
-                break;
-            }
-
-            z.bitpack_2pow19(&mut dst[CT_BYTES..]);
-
-            hint.hint_bitpack::<OMEGA>(&mut dst[CT_BYTES + Z_BYTES..]);
-        }
-    }
-
-    impl VerifyingKeyInternal<K, L, CT_BYTES, Z_BYTES, H_BYTES, W1_BYTES, SIG_SIZE> for PublicKey {
-        const OMEGA: usize = OMEGA;
-
-        const TAU: usize = TAU;
-
-        const GAMMA1: usize = GAMMA1;
-
-        const GAMMA2: usize = GAMMA2;
-
-        const BETA: usize = BETA;
-
-        fn bitunpack_z_hat(b: &[u8; Z_BYTES]) -> PolyVec<L> {
-            let mut pvec = PolyVec::zero();
-
-            for (poly, bytes) in pvec
-                .v
-                .iter_mut()
-                .zip(b.chunks_exact(Poly::packed_bytesize(20)))
-            {
-                poly.bitunpack_2pow19(bytes.try_into().unwrap());
-            }
-
-            pvec
-        }
-
-        fn w1encode(w1: &PolyVec<K>) -> [u8; W1_BYTES] {
-            let mut bytes = [const { MaybeUninit::uninit() }; W1_BYTES];
-            for (chunk, p) in bytes
-                .chunks_exact_mut(Poly::packed_bytesize(4))
-                .zip(w1.v.iter())
-            {
-                p.pack_simple_uninit_4bit(chunk.try_into().unwrap());
-            }
-
-            unsafe { transmute(bytes) }
-        }
-
-        fn use_hint(w1: &mut PolyVec<K>, h: &PolyVec<K>) {
-            for (i, poly) in w1.v.iter_mut().enumerate() {
-                for (j, a) in poly.f.iter_mut().enumerate() {
-                    *a = coeff::use_hint_32(h.v[i].f[j] as usize, *a);
-                }
-            }
-        }
-
-        fn pk(&self) -> &super::PublicKey<K, L> {
-            &self.key
-        }
-    }
-
-    impl From<super::PublicKey<K, L>> for PublicKey {
-        fn from(key: super::PublicKey<K, L>) -> Self {
-            Self { key }
-        }
-    }
-}
-
-pub mod mldsa87 {
-    //! ML-DSA-87 parameter set.
-
-    use core::mem::{transmute, MaybeUninit};
-
-    use crate::hash;
-
-    use super::{
-        bitlen, coeff, sig_size, sk_size, vk_size, Poly, PolyVec, SignerInternal, VerifyingKeyInternal,
-        Q,
-    };
-
-    const K: usize = 8;
-    const L: usize = 7;
-    const ETA: usize = 2;
-    const GAMMA1: usize = 1 << 19;
-    const GAMMA2: usize = (Q as usize - 1) / 32;
-    const LAMBDA: usize = 256;
-    const TAU: usize = 60;
-    const BETA: usize = TAU * ETA;
-    const OMEGA: usize = 75;
-
-    const CT_BYTES: usize = LAMBDA / 4;
-    const Z_BYTES: usize = L * 32 * (1 + bitlen(GAMMA1 - 1));
-    const H_BYTES: usize = OMEGA + K;
-    const W1_BYTES: usize = K * 32 * bitlen((Q as usize - 1) / (2 * GAMMA2) - 1);
-
-    /// Public key bytesize.
-    pub const PUBKEY_SIZE: usize = vk_size(K);
-
-    /// Private key bytesize.
-    pub const PRIVKEY_SIZE: usize = sk_size(K, L, ETA);
-
-    /// Signature bytesize.
-    pub const SIG_SIZE: usize = sig_size(K, L, LAMBDA, GAMMA1, OMEGA);
-
-    /// Private key used for signing.
-    pub type PrivateKey = super::PrivateKey<K, L, ETA>;
-
-    /// Public Key used for verifying.
-    pub struct PublicKey {
-        key: super::PublicKey<K, L>,
-    }
-
-    impl SignerInternal for PrivateKey {
-        fn sign_internal(&self, dst: &mut [u8], m: &[u8], rnd: &[u8; 32]) {
-            let (c_tilde, buf) = dst.split_first_chunk_mut::<CT_BYTES>().unwrap();
-            let (w1_bytes, buf) = buf.split_first_chunk_mut::<W1_BYTES>().unwrap();
-            let (mu, buf) = buf.split_first_chunk_mut::<64>().unwrap();
-            let rho_prime2: &mut [u8; 64] = buf.first_chunk_mut().unwrap();
-
-            let mut h = hash::Shake256::init();
-
-            h.absorb_and_squeeze(mu, &[&self.tr, m]);
-
-            h.absorb_and_squeeze(rho_prime2, &[&self.k, rnd, mu]);
-
-            let mut y = PolyVec::zero();
-            let mut y_hat = PolyVec::zero();
-            let mut w = PolyVec::zero();
-            let mut w1 = PolyVec::zero();
-            let mut w0 = PolyVec::zero();
-            let mut z = PolyVec::zero();
-            let mut hint = PolyVec::zero();
-            let mut c_hat = Poly::zero();
-
-            for nonce in (0..).step_by(L) {
-                y.expand_mask_2pow19(rho_prime2, nonce, &mut h);
-
-                y_hat.ntt(&y);
-
-                w.multiply_matvec_ntt(&self.a_hat, &y_hat);
-                w.reduce_invntt_tomont_inplace();
-
-                w.decompose_32(&mut w0, &mut w1);
-                w1.pack_simple_4bit(w1_bytes);
-                h.absorb_and_squeeze(c_tilde, &[mu, w1_bytes]);
-
-                h.absorb(c_tilde);
-                h.finalize();
-                c_hat.f.fill(0);
-                c_hat.sample_in_ball(&mut h, TAU);
-                h.reset();
-                c_hat.ntt_inplace();
-
-                z.multiply_poly_ntt(&c_hat, &self.s1_hat);
-                z.invntt_tomont_inplace();
-                z += &y;
-                z.reduce();
-
-                if !z.norm_in_bound(GAMMA1 - BETA) {
-                    continue;
-                }
-
-                hint.multiply_poly_ntt(&c_hat, &self.s2_hat);
-                hint.invntt_tomont_inplace();
-                w0 -= &hint;
-                w0.reduce();
-
-                if !w0.norm_in_bound(GAMMA2 - BETA) {
-                    continue;
-                }
-
-                hint.multiply_poly_ntt(&c_hat, &self.t0_hat);
-                hint.invntt_tomont_inplace();
-                hint.reduce();
-
-                if !hint.norm_in_bound(GAMMA2) {
-                    continue;
-                }
-
-                w0 += &hint;
-
-                let count = hint.make_hint::<{ GAMMA2 as i32 }>(&w0, &w1);
-
-                if count >= OMEGA {
-                    continue;
-                }
-
-                break;
-            }
-
-            z.bitpack_2pow19(&mut dst[CT_BYTES..]);
-
-            hint.hint_bitpack::<OMEGA>(&mut dst[CT_BYTES + Z_BYTES..]);
-        }
-    }
-
-    impl VerifyingKeyInternal<K, L, CT_BYTES, Z_BYTES, H_BYTES, W1_BYTES, SIG_SIZE> for PublicKey {
-        const OMEGA: usize = OMEGA;
-
-        const TAU: usize = TAU;
-
-        const GAMMA1: usize = GAMMA1;
-
-        const GAMMA2: usize = GAMMA2;
-
-        const BETA: usize = BETA;
-
-        fn bitunpack_z_hat(b: &[u8; Z_BYTES]) -> PolyVec<L> {
-            let mut pvec = PolyVec::zero();
-
-            for (poly, bytes) in pvec
-                .v
-                .iter_mut()
-                .zip(b.chunks_exact(Poly::packed_bytesize(20)))
-            {
-                poly.bitunpack_2pow19(bytes.try_into().unwrap());
-            }
-
-            pvec
-        }
-
-        fn w1encode(w1: &PolyVec<K>) -> [u8; W1_BYTES] {
-            let mut bytes = [const { MaybeUninit::uninit() }; W1_BYTES];
-            for (chunk, p) in bytes
-                .chunks_exact_mut(Poly::packed_bytesize(4))
-                .zip(w1.v.iter())
-            {
-                p.pack_simple_uninit_4bit(chunk.try_into().unwrap());
-            }
-
-            unsafe { transmute(bytes) }
-        }
-
-        fn use_hint(w1: &mut PolyVec<K>, h: &PolyVec<K>) {
-            for (i, poly) in w1.v.iter_mut().enumerate() {
-                for (j, a) in poly.f.iter_mut().enumerate() {
-                    *a = coeff::use_hint_32(h.v[i].f[j] as usize, *a);
-                }
-            }
-        }
-
-        fn pk(&self) -> &super::PublicKey<K, L> {
-            &self.key
-        }
-    }
-
-    impl From<super::PublicKey<K, L>> for PublicKey {
-        fn from(key: super::PublicKey<K, L>) -> Self {
-            Self { key }
-        }
-    }
 }
 
 fn vk_encode<const K: usize>(dst: &mut [u8], rho: &[u8; 32], t1: &PolyVec<K>) {
@@ -823,7 +479,7 @@ impl<const K: usize, const L: usize> PublicKey<K, L> {
 }
 
 /// Private key used for signing.
-pub struct PrivateKey<const K: usize, const L: usize, const ETA: usize> {
+pub(crate) struct PrivateKey<const K: usize, const L: usize, const ETA: usize> {
     rho: [u8; 32],
     k: [u8; 32],
     tr: [u8; 64],
@@ -841,76 +497,7 @@ impl<const K: usize, const L: usize, const ETA: usize> Drop for PrivateKey<K, L,
 }
 
 impl<const K: usize, const L: usize, const ETA: usize> PrivateKey<K, L, ETA> {
-    /// Private key generation.
-    #[inline]
-    pub fn keygen<const VK_SIZE: usize>(
-        vk: &mut [u8; VK_SIZE],
-        rng: &mut impl CryptoRngCore,
-    ) -> Self {
-        debug_assert!(vk.len() >= vk_size(K));
-
-        let mut ksi = [0u8; 32];
-        rng.fill_bytes(&mut ksi);
-
-        let sk = Self::keygen_internal(vk, &ksi);
-
-        ksi.zeroize();
-
-        sk
-    }
-
-    fn keygen_internal<const PUBKEY_SIZE: usize>(
-        vk: &mut [u8; PUBKEY_SIZE],
-        ksi: &[u8; 32],
-    ) -> Self {
-        let mut h = hash::Shake256::init();
-        h.absorb_multi(&[ksi, &[K as u8], &[L as u8]]);
-        let rho: [u8; 32] = h.squeeze_array();
-        let rho_prime: [u8; 64] = h.squeeze_array();
-        let k: [u8; 32] = h.squeeze_array();
-
-        let mut s1_hat = PolyVec::zero();
-        let mut s2_hat = PolyVec::zero();
-        let mut t0_hat = PolyVec::zero();
-        let a_hat = PolyMat::expand_a(&rho);
-
-        expand_s::<K, L, ETA>(&mut s1_hat, &mut s2_hat, &rho_prime);
-
-        s1_hat.ntt_inplace();
-
-        let mut t = PolyVec::zero();
-        let mut t1 = PolyVec::zero();
-
-        t.multiply_matvec_ntt(&a_hat, &s1_hat);
-        t.reduce_invntt_tomont_inplace();
-
-        t += &s2_hat;
-
-        t.power2round(&mut t1, &mut t0_hat);
-
-        vk_encode(vk, &rho, &t1);
-
-        h.reset();
-        h.absorb(vk);
-        h.finalize();
-        let tr: [u8; 64] = h.squeeze_array();
-
-        s2_hat.ntt_inplace();
-        t0_hat.ntt_inplace();
-
-        Self {
-            rho,
-            k,
-            tr,
-            s1_hat,
-            s2_hat,
-            t0_hat,
-            a_hat,
-        }
-    }
-
     /// Encode private key to bytes.
-    #[inline]
     pub fn encode(&self, dst: &mut [u8]) {
         let s1 = self.s1_hat.invntt();
         let s2 = self.s2_hat.invntt();
@@ -946,7 +533,6 @@ impl<const K: usize, const L: usize, const ETA: usize> PrivateKey<K, L, ETA> {
     }
 
     /// Decode private key from bytes.
-    #[inline]
     pub fn decode(src: &[u8]) -> Self {
         let mut rho: MaybeUninit<[u8; 32]> = MaybeUninit::uninit();
         let mut k: MaybeUninit<[u8; 32]> = MaybeUninit::uninit();
@@ -1458,11 +1044,11 @@ impl Poly {
         true
     }
 
-    fn make_hint<const G2: i32>(&mut self, p0: &Poly, p1: &Poly) -> usize {
+    fn make_hint(&mut self, p0: &Poly, p1: &Poly, gamma2: usize) -> usize {
         let mut sum = 0;
 
         for i in 0..N {
-            let h = coeff::make_hint::<G2>(p0.f[i], p1.f[i]);
+            let h = coeff::make_hint(p0.f[i], p1.f[i], gamma2 as i32);
 
             self.f[i] = h as i32;
             sum += h;
@@ -1780,10 +1366,10 @@ impl<const K: usize> PolyVec<K> {
         true
     }
 
-    fn make_hint<const G2: i32>(&mut self, x0: &PolyVec<K>, x1: &PolyVec<K>) -> usize {
+    fn make_hint(&mut self, x0: &PolyVec<K>, x1: &PolyVec<K>, gamma2: usize) -> usize {
         let mut sum = 0;
         for i in 0..K {
-            sum += self.v[i].make_hint::<G2>(&x0.v[i], &x1.v[i]);
+            sum += self.v[i].make_hint(&x0.v[i], &x1.v[i], gamma2);
         }
 
         sum
