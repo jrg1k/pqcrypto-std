@@ -706,13 +706,11 @@ impl EncapsKey {
     pub const CIPHERTEXT_SIZE: usize = PkeEncKey::CIPHERTEXT_SIZE;
 
     /// Encode key to bytes.
-    #[inline]
     pub fn to_bytes(&self, bytes: &mut [u8; Self::BYTE_SIZE]) {
         self.ek_pke.to_bytes(bytes);
     }
 
     /// Decode key from bytes.
-    #[inline]
     pub fn from_bytes(bytes: &[u8; Self::BYTE_SIZE]) -> Self {
         let ek_pke = PkeEncKey::from_bytes(bytes);
 
@@ -738,7 +736,6 @@ impl EncapsKey {
     }
 
     /// Algorithm 20 ML-KEM.Encaps(ek)
-    #[inline]
     pub fn encaps(
         &self,
         c: &mut [u8; Self::CIPHERTEXT_SIZE],
@@ -763,7 +760,6 @@ impl DecapsKey {
     pub const BYTE_SIZE: usize = PkeDecKey::BYTE_SIZE + PkeEncKey::BYTE_SIZE + 32 + 32;
 
     /// Encode key to bytes.
-    #[inline]
     pub fn to_bytes(&self, bytes: &mut [u8; Self::BYTE_SIZE], ek: &EncapsKey) {
         let (dk_bytes, bytes) = bytes.split_first_chunk_mut().unwrap();
         let (ek_bytes, bytes) = bytes.split_first_chunk_mut().unwrap();
@@ -777,7 +773,6 @@ impl DecapsKey {
     }
 
     /// Decode key from bytes.
-    #[inline]
     pub fn from_bytes(bytes: &[u8; Self::BYTE_SIZE]) -> Self {
         let (dk_bytes, bytes) = bytes.split_first_chunk().unwrap();
         let (_ek_bytes, bytes): (&[u8; PkeEncKey::BYTE_SIZE], _) =
@@ -796,7 +791,6 @@ impl DecapsKey {
 
     /// Algorithm 21 ML-KEM.Decaps(dk, c)
     /// Algorithm 18 ML-KEM.Decaps_internal(dk, c)
-    #[inline]
     pub fn decaps(&self, k: &mut [u8; 32], ek: &EncapsKey, c: &[u8; EncapsKey::CIPHERTEXT_SIZE]) {
         let mut m_prime = [0u8; 32];
         self.dk_pke.decrypt(&mut m_prime, c);
@@ -839,7 +833,6 @@ fn cmov<const N: usize>(dst: &mut [u8; N], src: &[u8; N], cond: u32) {
 }
 
 /// Algorithm 19 ML-KEM.KeyGen()
-#[inline]
 pub fn keygen(rng: &mut impl CryptoRngCore) -> (EncapsKey, DecapsKey) {
     let mut d = [0u8; 32];
     rng.fill_bytes(&mut d);
