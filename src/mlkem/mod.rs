@@ -2,7 +2,9 @@
 mod compress;
 mod reduce;
 
-use compress::{compr_10bit, compr_1bit, compr_4bit, decompr_10bit, decompr_1bit, decompr_4bit};
+use compress::{
+    compr_10bit, compr_1bit, compr_4bit, decompr_10bit, decompr_1bit, decompr_4bit,
+};
 use core::{
     array,
     fmt::Display,
@@ -346,7 +348,8 @@ const fn bytes2coeffs(b0: u8, b1: u8, b2: u8) -> (i16, i16) {
 /// - c0 = (a0*b0 + a1*b1*zeta)R^-1 (mod Q)
 /// - c1 = (a0*b1 + a1*b0)R^-1 (mod Q)
 const fn basemul(a0: i16, a1: i16, b0: i16, b1: i16, zeta: i16) -> (i16, i16) {
-    let c0 = reduce::mont_mul(a0, b0) + reduce::mont_mul(reduce::mont_mul(a1, b1), zeta);
+    let c0 =
+        reduce::mont_mul(a0, b0) + reduce::mont_mul(reduce::mont_mul(a1, b1), zeta);
     let c1 = reduce::mont_mul(a0, b1) + reduce::mont_mul(a1, b0);
 
     (c0, c1)
@@ -763,7 +766,8 @@ impl DecapsKey {
     pub fn to_bytes(&self, bytes: &mut [u8; Self::BYTE_SIZE], ek: &EncapsKey) {
         let (dk_bytes, bytes) = bytes.split_first_chunk_mut().unwrap();
         let (ek_bytes, bytes) = bytes.split_first_chunk_mut().unwrap();
-        let (ek_hash, bytes): (&mut [u8; 32], _) = bytes.split_first_chunk_mut().unwrap();
+        let (ek_hash, bytes): (&mut [u8; 32], _) =
+            bytes.split_first_chunk_mut().unwrap();
         let (z, _): (&mut [u8; 32], _) = bytes.split_first_chunk_mut().unwrap();
 
         self.dk_pke.to_bytes(dk_bytes);
@@ -791,7 +795,12 @@ impl DecapsKey {
 
     /// Algorithm 21 ML-KEM.Decaps(dk, c)
     /// Algorithm 18 ML-KEM.Decaps_internal(dk, c)
-    pub fn decaps(&self, k: &mut [u8; 32], ek: &EncapsKey, c: &[u8; EncapsKey::CIPHERTEXT_SIZE]) {
+    pub fn decaps(
+        &self,
+        k: &mut [u8; 32],
+        ek: &EncapsKey,
+        c: &[u8; EncapsKey::CIPHERTEXT_SIZE],
+    ) {
         let mut m_prime = [0u8; 32];
         self.dk_pke.decrypt(&mut m_prime, c);
 
@@ -870,7 +879,8 @@ mod tests {
         test_data_path.push("tests/kyber-keygen.json");
 
         let test_data = read_to_string(&test_data_path).unwrap();
-        let test_data: Tests<KeyGenTestGroup> = serde_json::from_str(&test_data).unwrap();
+        let test_data: Tests<KeyGenTestGroup> =
+            serde_json::from_str(&test_data).unwrap();
 
         for test_group in test_data
             .test_groups
@@ -885,13 +895,15 @@ mod tests {
                 let (ek, dk) = keygen_deterministic(test.d, test.z);
 
                 // Test decoded decaps key
-                let test_dk = DecapsKey::from_bytes(test.dk.as_slice().try_into().unwrap());
+                let test_dk =
+                    DecapsKey::from_bytes(test.dk.as_slice().try_into().unwrap());
                 assert_eq!(test_dk.z, test.z);
                 assert_eq!(dk.z, test.z);
                 assert_eq!(test_dk.dk_pke.s, dk.dk_pke.s);
 
                 // Test decoded encaps key
-                let test_ek = EncapsKey::from_bytes(test.ek.as_slice().try_into().unwrap());
+                let test_ek =
+                    EncapsKey::from_bytes(test.ek.as_slice().try_into().unwrap());
                 assert_eq!(test_ek.ek_pke.rho, ek.ek_pke.rho);
                 assert_eq!(test_ek.ek_pke.t.vec, ek.ek_pke.t.vec);
 
@@ -925,12 +937,20 @@ mod tests {
                 KemTestGroupKind::Aft { tests } => {
                     for test in tests.iter() {
                         assert_eq!(test.c.len(), EncapsKey::CIPHERTEXT_SIZE);
-                        let ek = EncapsKey::from_bytes(test.ek.as_slice().try_into().unwrap());
-                        let dk = DecapsKey::from_bytes(test.dk.as_slice().try_into().unwrap());
+                        let ek = EncapsKey::from_bytes(
+                            test.ek.as_slice().try_into().unwrap(),
+                        );
+                        let dk = DecapsKey::from_bytes(
+                            test.dk.as_slice().try_into().unwrap(),
+                        );
 
                         let mut c = [0u8; EncapsKey::CIPHERTEXT_SIZE];
                         let mut k = [0u8; 32];
-                        ek.encaps_internal(&mut c, &mut k, test.m.as_slice().try_into().unwrap());
+                        ek.encaps_internal(
+                            &mut c,
+                            &mut k,
+                            test.m.as_slice().try_into().unwrap(),
+                        );
 
                         assert_eq!(c, test.c.as_slice());
                         assert_eq!(k, test.k.as_slice());

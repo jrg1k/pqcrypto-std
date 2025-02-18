@@ -43,7 +43,11 @@ fn test_barret_reduce() {
         let n_modq = n.wrapping_rem(Q);
         let n_breduced = barrett_reduce(n);
         assert!(n_breduced < 3329 && n_breduced > -3329);
-        assert!(n_modq == n_breduced || n_modq - Q == n_breduced || n_modq + Q == n_breduced);
+        assert!(
+            n_modq == n_breduced
+                || n_modq - Q == n_breduced
+                || n_modq + Q == n_breduced
+        );
     }
 }
 

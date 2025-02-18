@@ -69,7 +69,12 @@ trait SigningKeyInternal<
 >: From<PrivateKey<K, L, ETA>>
 {
     fn privkey(&self) -> &PrivateKey<K, L, ETA>;
-    fn expand_mask(pvec: &mut PolyVec<L>, rho: &[u8; 64], mu: usize, h: &mut hash::Shake256);
+    fn expand_mask(
+        pvec: &mut PolyVec<L>,
+        rho: &[u8; 64],
+        mu: usize,
+        h: &mut hash::Shake256,
+    );
     fn bitpack_z(pvec: &PolyVec<L>, dst: &mut [u8; Z_BYTES]);
     fn pack_simple(w1: &PolyVec<K>, z: &mut [u8; W1_BYTES]);
     fn decompose(x: &PolyVec<K>, x0: &mut PolyVec<K>, x1: &mut PolyVec<K>);
@@ -244,7 +249,11 @@ trait VerifyingKeyInternal<
 
     fn pk(&self) -> &PublicKey<K, L>;
 
-    fn verify_internal(&self, m: &[u8], sig: &[u8; SIG_SIZE]) -> Result<(), VerifyError> {
+    fn verify_internal(
+        &self,
+        m: &[u8],
+        sig: &[u8; SIG_SIZE],
+    ) -> Result<(), VerifyError> {
         let (c_tilde, sig) = sig.split_first_chunk::<CT_BYTES>().unwrap();
         let (z_bytes, sig) = sig.split_first_chunk::<Z_BYTES>().unwrap();
         let h_bytes: &[u8; H_BYTES] = sig.try_into().unwrap();
@@ -382,9 +391,23 @@ impl<
         const CT_BYTES: usize,
         const W1_BYTES: usize,
         const Z_BYTES: usize,
-    > SigningKey<K, L, ETA, TAU, GAMMA1, GAMMA2, BETA, OMEGA, CT_BYTES, W1_BYTES, Z_BYTES> for T
+    >
+    SigningKey<K, L, ETA, TAU, GAMMA1, GAMMA2, BETA, OMEGA, CT_BYTES, W1_BYTES, Z_BYTES>
+    for T
 where
-    T: SigningKeyInternal<K, L, ETA, TAU, GAMMA1, GAMMA2, BETA, OMEGA, CT_BYTES, W1_BYTES, Z_BYTES>,
+    T: SigningKeyInternal<
+        K,
+        L,
+        ETA,
+        TAU,
+        GAMMA1,
+        GAMMA2,
+        BETA,
+        OMEGA,
+        CT_BYTES,
+        W1_BYTES,
+        Z_BYTES,
+    >,
 {
     fn sign(&self, sig: &mut [u8], rng: &mut impl CryptoRngCore, m: &[u8]) {
         let mut rnd = [0u8; 32];
@@ -424,8 +447,18 @@ const fn pubkey_size(k: usize) -> usize {
 
 const fn privkey_size(k: usize, l: usize, eta: usize) -> usize {
     match eta {
-        2 => 32 + 32 + 64 + l * Poly::PACKED_3BIT + k * (Poly::PACKED_3BIT + Poly::PACKED_13BIT),
-        4 => 32 + 32 + 64 + l * Poly::PACKED_4BIT + k * (Poly::PACKED_4BIT + Poly::PACKED_13BIT),
+        2 => {
+            32 + 32
+                + 64
+                + l * Poly::PACKED_3BIT
+                + k * (Poly::PACKED_3BIT + Poly::PACKED_13BIT)
+        }
+        4 => {
+            32 + 32
+                + 64
+                + l * Poly::PACKED_4BIT
+                + k * (Poly::PACKED_4BIT + Poly::PACKED_13BIT)
+        }
         _ => unreachable!(),
     }
 }
@@ -434,7 +467,13 @@ const fn bitlen(n: usize) -> usize {
     n.ilog2() as usize + 1
 }
 
-const fn sig_size(k: usize, l: usize, lambda: usize, gamma1: usize, omega: usize) -> usize {
+const fn sig_size(
+    k: usize,
+    l: usize,
+    lambda: usize,
+    gamma1: usize,
+    omega: usize,
+) -> usize {
     lambda / 4 + l * 32 * (1 + bitlen(gamma1 - 1)) + omega + k
 }
 
@@ -544,7 +583,8 @@ impl<const K: usize, const L: usize, const ETA: usize> PrivateKey<K, L, ETA> {
         k.write(src[32..64].try_into().unwrap());
         tr.write(src[64..128].try_into().unwrap());
 
-        let (rho, k, tr) = unsafe { (rho.assume_init(), k.assume_init(), tr.assume_init()) };
+        let (rho, k, tr) =
+            unsafe { (rho.assume_init(), k.assume_init(), tr.assume_init()) };
 
         let mut s1_hat = PolyVec::zero();
         let mut s2_hat = PolyVec::zero();
@@ -866,7 +906,10 @@ impl Poly {
         }
     }
 
-    fn pack_simple_uninit_4bit(&self, z: &mut [MaybeUninit<u8>; Self::packed_bytesize(4)]) {
+    fn pack_simple_uninit_4bit(
+        &self,
+        z: &mut [MaybeUninit<u8>; Self::packed_bytesize(4)],
+    ) {
         for (b, a) in z.iter_mut().zip(self.f.chunks_exact(2)) {
             b.write((a[0] | a[1] << 4) as u8);
         }
@@ -880,7 +923,10 @@ impl Poly {
         }
     }
 
-    fn pack_simple_uninit_6bit(&self, z: &mut [MaybeUninit<u8>; Self::packed_bytesize(6)]) {
+    fn pack_simple_uninit_6bit(
+        &self,
+        z: &mut [MaybeUninit<u8>; Self::packed_bytesize(6)],
+    ) {
         for (b, a) in z.chunks_exact_mut(3).zip(self.f.chunks_exact(4)) {
             b[0].write(((a[0] >> 0) | (a[1] << 6)) as u8);
             b[1].write(((a[1] >> 2) | (a[2] << 4)) as u8);
@@ -1256,7 +1302,11 @@ impl<const K: usize> PolyVec<K> {
         }
     }
 
-    fn multiply_matvec_ntt<const L: usize>(&mut self, m: &PolyMat<K, L>, v: &PolyVec<L>) {
+    fn multiply_matvec_ntt<const L: usize>(
+        &mut self,
+        m: &PolyMat<K, L>,
+        v: &PolyVec<L>,
+    ) {
         for i in 0..K {
             self.v[i].dot_prod_ntt(&m.m[i], v)
         }
@@ -1336,7 +1386,12 @@ impl<const K: usize> PolyVec<K> {
         }
     }
 
-    fn expand_mask_2pow17(&mut self, rho: &[u8; 64], mu: usize, h: &mut hash::Shake256) {
+    fn expand_mask_2pow17(
+        &mut self,
+        rho: &[u8; 64],
+        mu: usize,
+        h: &mut hash::Shake256,
+    ) {
         let mut blocks = [0u8; 5 * hash::SHAKE_256_RATE];
 
         for (r, p) in self.v.iter_mut().enumerate() {
@@ -1347,7 +1402,12 @@ impl<const K: usize> PolyVec<K> {
         }
     }
 
-    fn expand_mask_2pow19(&mut self, rho: &[u8; 64], mu: usize, h: &mut hash::Shake256) {
+    fn expand_mask_2pow19(
+        &mut self,
+        rho: &[u8; 64],
+        mu: usize,
+        h: &mut hash::Shake256,
+    ) {
         let mut blocks = [0u8; 5 * hash::SHAKE_256_RATE];
 
         for (r, p) in self.v.iter_mut().enumerate() {
@@ -1501,7 +1561,10 @@ mod tests {
                         let mut vk_bytes = [0u8; mldsa44::PUBKEY_SIZE];
                         let mut sk_bytes = [0u8; mldsa44::PRIVKEY_SIZE];
 
-                        let sk = mldsa44::PrivateKey::keygen_internal(&mut vk_bytes, &test.seed);
+                        let sk = mldsa44::PrivateKey::keygen_internal(
+                            &mut vk_bytes,
+                            &test.seed,
+                        );
                         sk.encode(&mut sk_bytes);
 
                         assert_eq!(vk_bytes, test.pk[..]);
@@ -1527,7 +1590,10 @@ mod tests {
                         let mut vk_bytes = [0u8; mldsa65::PUBKEY_SIZE];
                         let mut sk_bytes = [0u8; mldsa65::PRIVKEY_SIZE];
 
-                        let sk = mldsa65::PrivateKey::keygen_internal(&mut vk_bytes, &test.seed);
+                        let sk = mldsa65::PrivateKey::keygen_internal(
+                            &mut vk_bytes,
+                            &test.seed,
+                        );
                         sk.encode(&mut sk_bytes);
 
                         assert_eq!(vk_bytes, test.pk[..]);
@@ -1553,7 +1619,10 @@ mod tests {
                         let mut vk_bytes = [0u8; mldsa87::PUBKEY_SIZE];
                         let mut sk_bytes = [0u8; mldsa87::PRIVKEY_SIZE];
 
-                        let sk = mldsa87::PrivateKey::keygen_internal(&mut vk_bytes, &test.seed);
+                        let sk = mldsa87::PrivateKey::keygen_internal(
+                            &mut vk_bytes,
+                            &test.seed,
+                        );
                         sk.encode(&mut sk_bytes);
 
                         assert_eq!(vk_bytes, test.pk[..]);
@@ -1650,11 +1719,14 @@ mod tests {
                     let pk = mldsa44::PublicKey::decode(&tg.pk);
 
                     for test in tg.tests.iter() {
-                        match pk
-                            .verify_internal(&test.message, test.signature[..].try_into().unwrap())
-                        {
+                        match pk.verify_internal(
+                            &test.message,
+                            test.signature[..].try_into().unwrap(),
+                        ) {
                             Ok(_) => assert!(test.test_passed),
-                            Err(VerifyError::ZoutOfBound) => assert_eq!(test.reason, "z too large"),
+                            Err(VerifyError::ZoutOfBound) => {
+                                assert_eq!(test.reason, "z too large")
+                            }
                             Err(VerifyError::Mismatch) => {
                                 assert!(!test.test_passed)
                             }
@@ -1668,11 +1740,14 @@ mod tests {
                     let pk = mldsa65::PublicKey::decode(&tg.pk);
 
                     for test in tg.tests.iter() {
-                        match pk
-                            .verify_internal(&test.message, test.signature[..].try_into().unwrap())
-                        {
+                        match pk.verify_internal(
+                            &test.message,
+                            test.signature[..].try_into().unwrap(),
+                        ) {
                             Ok(_) => assert!(test.test_passed),
-                            Err(VerifyError::ZoutOfBound) => assert_eq!(test.reason, "z too large"),
+                            Err(VerifyError::ZoutOfBound) => {
+                                assert_eq!(test.reason, "z too large")
+                            }
                             Err(VerifyError::Mismatch) => {
                                 assert!(!test.test_passed)
                             }
@@ -1686,11 +1761,14 @@ mod tests {
                     let pk = mldsa87::PublicKey::decode(&tg.pk);
 
                     for test in tg.tests.iter() {
-                        match pk
-                            .verify_internal(&test.message, test.signature[..].try_into().unwrap())
-                        {
+                        match pk.verify_internal(
+                            &test.message,
+                            test.signature[..].try_into().unwrap(),
+                        ) {
                             Ok(_) => assert!(test.test_passed),
-                            Err(VerifyError::ZoutOfBound) => assert_eq!(test.reason, "z too large"),
+                            Err(VerifyError::ZoutOfBound) => {
+                                assert_eq!(test.reason, "z too large")
+                            }
                             Err(VerifyError::Mismatch) => {
                                 assert!(!test.test_passed)
                             }

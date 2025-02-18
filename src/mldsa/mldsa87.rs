@@ -1,8 +1,8 @@
 //! ML-DSA-87 parameter set.
 
 use super::{
-    bitlen, coeff, privkey_size, pubkey_size, sig_size, Poly, PolyVec, SigningKeyInternal,
-    VerifyingKeyInternal, Q,
+    bitlen, coeff, privkey_size, pubkey_size, sig_size, Poly, PolyVec,
+    SigningKeyInternal, VerifyingKeyInternal, Q,
 };
 use crate::hash;
 use core::mem::{transmute, MaybeUninit};
@@ -42,14 +42,31 @@ impl From<super::PrivateKey<K, L, ETA>> for PrivateKey {
     }
 }
 
-impl SigningKeyInternal<K, L, ETA, TAU, GAMMA1, GAMMA2, BETA, OMEGA, CT_BYTES, W1_BYTES, Z_BYTES>
-    for PrivateKey
+impl
+    SigningKeyInternal<
+        K,
+        L,
+        ETA,
+        TAU,
+        GAMMA1,
+        GAMMA2,
+        BETA,
+        OMEGA,
+        CT_BYTES,
+        W1_BYTES,
+        Z_BYTES,
+    > for PrivateKey
 {
     fn privkey(&self) -> &super::PrivateKey<K, L, ETA> {
         &self.key
     }
 
-    fn expand_mask(pvec: &mut PolyVec<L>, rho: &[u8; 64], mu: usize, h: &mut hash::Shake256) {
+    fn expand_mask(
+        pvec: &mut PolyVec<L>,
+        rho: &[u8; 64],
+        mu: usize,
+        h: &mut hash::Shake256,
+    ) {
         pvec.expand_mask_2pow19(rho, mu, h);
     }
 
@@ -71,7 +88,9 @@ pub struct PublicKey {
     key: super::PublicKey<K, L>,
 }
 
-impl VerifyingKeyInternal<K, L, CT_BYTES, Z_BYTES, H_BYTES, W1_BYTES, SIG_SIZE> for PublicKey {
+impl VerifyingKeyInternal<K, L, CT_BYTES, Z_BYTES, H_BYTES, W1_BYTES, SIG_SIZE>
+    for PublicKey
+{
     const OMEGA: usize = OMEGA;
 
     const TAU: usize = TAU;
