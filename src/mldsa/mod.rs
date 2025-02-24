@@ -3,10 +3,9 @@
 use crate::hash;
 use core::{
     array,
-    mem::{transmute, transmute_copy, MaybeUninit},
+    mem::{MaybeUninit, transmute, transmute_copy},
     ops::{AddAssign, Mul, MulAssign, SubAssign},
 };
-use rand_core::CryptoRngCore;
 use thiserror::Error;
 use zeroize::Zeroize;
 
@@ -324,15 +323,15 @@ pub trait VerifyingKey<
 }
 
 impl<
-        T,
-        const K: usize,
-        const L: usize,
-        const CT_BYTES: usize,
-        const Z_BYTES: usize,
-        const H_BYTES: usize,
-        const W1_BYTES: usize,
-        const SIG_SIZE: usize,
-    > VerifyingKey<K, L, CT_BYTES, Z_BYTES, H_BYTES, W1_BYTES, SIG_SIZE> for T
+    T,
+    const K: usize,
+    const L: usize,
+    const CT_BYTES: usize,
+    const Z_BYTES: usize,
+    const H_BYTES: usize,
+    const W1_BYTES: usize,
+    const SIG_SIZE: usize,
+> VerifyingKey<K, L, CT_BYTES, Z_BYTES, H_BYTES, W1_BYTES, SIG_SIZE> for T
 where
     T: VerifyingKeyInternal<K, L, CT_BYTES, Z_BYTES, H_BYTES, W1_BYTES, SIG_SIZE>
         + From<PublicKey<K, L>>,
@@ -370,46 +369,45 @@ pub trait SigningKey<
 >
 {
     /// Sign message `m` using randomness from `rng`.
-    fn sign(&self, sig: &mut [u8], rng: &mut impl CryptoRngCore, m: &[u8]);
+    fn sign(&self, sig: &mut [u8], rng: &mut impl rand_core::CryptoRng, m: &[u8]);
     fn encode(&self, dst: &mut [u8]);
     fn decode(src: &[u8]) -> Self;
 
     /// Private key generation.
-    fn keygen(vk: &mut [u8], rng: &mut impl CryptoRngCore) -> Self;
+    fn keygen(vk: &mut [u8], rng: &mut impl rand_core::CryptoRng) -> Self;
 }
 
 impl<
-        T,
-        const K: usize,
-        const L: usize,
-        const ETA: usize,
-        const TAU: usize,
-        const GAMMA1: usize,
-        const GAMMA2: usize,
-        const BETA: usize,
-        const OMEGA: usize,
-        const CT_BYTES: usize,
-        const W1_BYTES: usize,
-        const Z_BYTES: usize,
-    >
-    SigningKey<K, L, ETA, TAU, GAMMA1, GAMMA2, BETA, OMEGA, CT_BYTES, W1_BYTES, Z_BYTES>
+    T,
+    const K: usize,
+    const L: usize,
+    const ETA: usize,
+    const TAU: usize,
+    const GAMMA1: usize,
+    const GAMMA2: usize,
+    const BETA: usize,
+    const OMEGA: usize,
+    const CT_BYTES: usize,
+    const W1_BYTES: usize,
+    const Z_BYTES: usize,
+> SigningKey<K, L, ETA, TAU, GAMMA1, GAMMA2, BETA, OMEGA, CT_BYTES, W1_BYTES, Z_BYTES>
     for T
 where
     T: SigningKeyInternal<
-        K,
-        L,
-        ETA,
-        TAU,
-        GAMMA1,
-        GAMMA2,
-        BETA,
-        OMEGA,
-        CT_BYTES,
-        W1_BYTES,
-        Z_BYTES,
-    >,
+            K,
+            L,
+            ETA,
+            TAU,
+            GAMMA1,
+            GAMMA2,
+            BETA,
+            OMEGA,
+            CT_BYTES,
+            W1_BYTES,
+            Z_BYTES,
+        >,
 {
-    fn sign(&self, sig: &mut [u8], rng: &mut impl CryptoRngCore, m: &[u8]) {
+    fn sign(&self, sig: &mut [u8], rng: &mut impl rand_core::CryptoRng, m: &[u8]) {
         let mut rnd = [0u8; 32];
         rng.fill_bytes(&mut rnd);
 
@@ -427,7 +425,7 @@ where
     }
 
     /// Private key generation.
-    fn keygen(pk: &mut [u8], rng: &mut impl CryptoRngCore) -> Self {
+    fn keygen(pk: &mut [u8], rng: &mut impl rand_core::CryptoRng) -> Self {
         debug_assert!(pk.len() >= pubkey_size(K));
 
         let mut ksi = [0u8; 32];
@@ -902,7 +900,7 @@ impl Poly {
 
     fn pack_simple_4bit(&self, z: &mut [u8; Self::packed_bytesize(4)]) {
         for (b, a) in z.iter_mut().zip(self.f.chunks_exact(2)) {
-            *b = (a[0] | a[1] << 4) as u8;
+            *b = (a[0] | (a[1] << 4)) as u8;
         }
     }
 
@@ -911,7 +909,7 @@ impl Poly {
         z: &mut [MaybeUninit<u8>; Self::packed_bytesize(4)],
     ) {
         for (b, a) in z.iter_mut().zip(self.f.chunks_exact(2)) {
-            b.write((a[0] | a[1] << 4) as u8);
+            b.write((a[0] | (a[1] << 4)) as u8);
         }
     }
 
@@ -985,17 +983,17 @@ impl Poly {
             let a: [u16; 8] = array::from_fn(|i| (ETA - a[i]) as u16);
 
             b[0] = a[0] as u8;
-            b[1] = ((a[0] >> 8) | a[1] << 5) as u8;
+            b[1] = ((a[0] >> 8) | (a[1] << 5)) as u8;
             b[2] = (a[1] >> 3) as u8;
-            b[3] = ((a[1] >> 11) | a[2] << 2) as u8;
+            b[3] = ((a[1] >> 11) | (a[2] << 2)) as u8;
             b[4] = ((a[2] >> 6) | (a[3] << 7)) as u8;
             b[5] = (a[3] >> 1) as u8;
-            b[6] = ((a[3] >> 9) | a[4] << 4) as u8;
+            b[6] = ((a[3] >> 9) | (a[4] << 4)) as u8;
             b[7] = (a[4] >> 4) as u8;
-            b[8] = ((a[4] >> 12) | a[5] << 1) as u8;
-            b[9] = ((a[5] >> 7) | a[6] << 6) as u8;
+            b[8] = ((a[4] >> 12) | (a[5] << 1)) as u8;
+            b[9] = ((a[5] >> 7) | (a[6] << 6)) as u8;
             b[10] = (a[6] >> 2) as u8;
-            b[11] = ((a[6] >> 10) | a[7] << 3) as u8;
+            b[11] = ((a[6] >> 10) | (a[7] << 3)) as u8;
             b[12] = (a[7] >> 5) as u8;
         }
     }
@@ -1510,7 +1508,6 @@ fn expand_s<const K: usize, const L: usize, const ETA: usize>(
 #[cfg(test)]
 mod tests {
     use rand::RngCore;
-    use rand_core::OsRng;
     use serde::Deserialize;
     use std::{fs::read_to_string, path::PathBuf};
 
@@ -1518,31 +1515,32 @@ mod tests {
 
     #[test]
     fn test_gen_sign_verify() {
+        let mut rng = rand::rng();
         let mut pk = [0u8; mldsa44::PUBKEY_SIZE];
-        let sk = mldsa44::PrivateKey::keygen(&mut pk, &mut OsRng);
+        let sk = mldsa44::PrivateKey::keygen(&mut pk, &mut rng);
         let vk = mldsa44::PublicKey::decode(&pk);
         let mut token = [0u8; 32];
-        OsRng.fill_bytes(&mut token);
+        rng.fill_bytes(&mut token);
         let mut sig = [0u8; mldsa44::SIG_SIZE];
-        sk.sign(&mut sig, &mut OsRng, &token);
+        sk.sign(&mut sig, &mut rng, &token);
         vk.verify(&token, &sig).unwrap();
 
         let mut pk = [0u8; mldsa65::PUBKEY_SIZE];
-        let sk = mldsa65::PrivateKey::keygen(&mut pk, &mut OsRng);
+        let sk = mldsa65::PrivateKey::keygen(&mut pk, &mut rng);
         let vk = mldsa65::PublicKey::decode(&pk);
         let mut token = [0u8; 32];
-        OsRng.fill_bytes(&mut token);
+        rng.fill_bytes(&mut token);
         let mut sig = [0u8; mldsa65::SIG_SIZE];
-        sk.sign(&mut sig, &mut OsRng, &token);
+        sk.sign(&mut sig, &mut rand::rng(), &token);
         vk.verify(&token, &sig).unwrap();
 
         let mut pk = [0u8; mldsa87::PUBKEY_SIZE];
-        let sk = mldsa87::PrivateKey::keygen(&mut pk, &mut OsRng);
+        let sk = mldsa87::PrivateKey::keygen(&mut pk, &mut rng);
         let vk = mldsa87::PublicKey::decode(&pk);
         let mut token = [0u8; 32];
-        OsRng.fill_bytes(&mut token);
+        rng.fill_bytes(&mut token);
         let mut sig = [0u8; mldsa87::SIG_SIZE];
-        sk.sign(&mut sig, &mut OsRng, &token);
+        sk.sign(&mut sig, &mut rand::rng(), &token);
         vk.verify(&token, &sig).unwrap();
     }
 
@@ -1727,11 +1725,11 @@ mod tests {
                             Err(VerifyError::ZoutOfBound) => {
                                 assert_eq!(test.reason, "z too large")
                             }
-                            Err(VerifyError::Mismatch) => {
-                                assert!(!test.test_passed)
-                            }
                             Err(VerifyError::TooManyHints) => {
                                 assert_eq!(test.reason, "too many hints")
+                            }
+                            Err(VerifyError::Mismatch) => {
+                                assert!(!test.test_passed)
                             }
                         }
                     }

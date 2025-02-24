@@ -1,11 +1,11 @@
 //! ML-DSA-44 parameter set.
 
 use super::{
-    bitlen, coeff, privkey_size, pubkey_size, sig_size, Poly, PolyVec,
-    SigningKeyInternal, VerifyingKeyInternal, Q,
+    Poly, PolyVec, Q, SigningKeyInternal, VerifyingKeyInternal, bitlen, coeff,
+    privkey_size, pubkey_size, sig_size,
 };
 use crate::hash;
-use core::mem::{transmute, MaybeUninit};
+use core::mem::{MaybeUninit, transmute};
 
 const K: usize = 4;
 const L: usize = 4;

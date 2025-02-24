@@ -40,11 +40,11 @@ pub const fn barrett_reduce(a: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::{rngs::OsRng, Rng};
+    use rand::Rng;
     #[test]
     fn test_barret_reduce() {
         for _ in 0..10000 {
-            let n: i32 = OsRng.gen();
+            let n: i32 = rand::rng().random();
             let n = n % (1 << 24);
             let n_modq = n.wrapping_rem(Q);
             let n_breduced = barrett_reduce(n);

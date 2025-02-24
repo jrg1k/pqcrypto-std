@@ -3,16 +3,15 @@ mod compress;
 mod reduce;
 
 use compress::{
-    compr_10bit, compr_1bit, compr_4bit, decompr_10bit, decompr_1bit, decompr_4bit,
+    compr_1bit, compr_4bit, compr_10bit, decompr_1bit, decompr_4bit, decompr_10bit,
 };
 use core::{
     array,
     fmt::Display,
     hint::black_box,
-    mem::{self, transmute, MaybeUninit},
+    mem::{self, MaybeUninit, transmute},
     ops::{AddAssign, Mul, SubAssign},
 };
-use rand_core::CryptoRngCore;
 
 use crate::hash;
 
@@ -132,8 +131,8 @@ impl Poly {
                 .chunks_exact(3)
                 .flat_map(|b| {
                     let (b0, b1, b2) = (b[0] as u16, b[1] as u16, b[2] as u16);
-                    let d1 = b0 | (b1 & 0xF) << 8;
-                    let d2 = b1 >> 4 | b2 << 4;
+                    let d1 = b0 | ((b1 & 0xF) << 8);
+                    let d2 = (b1 >> 4) | (b2 << 4);
 
                     [d1, d2]
                 })
@@ -241,7 +240,7 @@ impl Poly {
         for (b, a) in bytes.iter_mut().zip(self.f.chunks_exact(2)) {
             let c: [u8; 2] = array::from_fn(|i| compr_4bit(a[i]));
 
-            *b = c[0] | c[1] << 4;
+            *b = c[0] | (c[1] << 4);
         }
     }
 
@@ -311,7 +310,7 @@ impl SubAssign<&Poly> for Poly {
 
 impl Display for Poly {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let mut coeffs = self.f.iter().enumerate().filter(|(_, &a)| a != 0);
+        let mut coeffs = self.f.iter().enumerate().filter(|&(_, &a)| a != 0);
 
         match coeffs.next() {
             Some((_, a)) => write!(f, "f(X) = {}", a)?,
@@ -337,8 +336,8 @@ const fn coeffs2bytes(a: i16, b: i16) -> (u8, u8, u8) {
 
 /// Convert 3 bytes into 2 integers mod Q.
 const fn bytes2coeffs(b0: u8, b1: u8, b2: u8) -> (i16, i16) {
-    let t0 = ((b0 as u16) | (b1 as u16) << 8) & 0xFFF;
-    let t1 = (((b1 as u16) >> 4) | (b2 as u16) << 4) & 0xFFF;
+    let t0 = ((b0 as u16) | ((b1 as u16) << 8)) & 0xFFF;
+    let t1 = (((b1 as u16) >> 4) | ((b2 as u16) << 4)) & 0xFFF;
 
     (t0 as i16, t1 as i16)
 }
@@ -437,9 +436,9 @@ impl PolyVec {
             for (a, b) in p.f.chunks_exact_mut(4).zip(b.chunks_exact(5)) {
                 let mut t: [u16; 5] = array::from_fn(|i| b[i] as u16);
                 t[0] |= t[1] << 8;
-                t[1] = t[1] >> 2 | t[2] << 6;
-                t[2] = t[2] >> 4 | t[3] << 4;
-                t[3] = t[3] >> 6 | (t[4] << 2);
+                t[1] = (t[1] >> 2) | (t[2] << 6);
+                t[2] = (t[2] >> 4) | (t[3] << 4);
+                t[3] = (t[3] >> 6) | (t[4] << 2);
 
                 for (a, n) in a.iter_mut().zip(&t[..4]) {
                     *a = decompr_10bit(n & 0x3FF);
@@ -743,7 +742,7 @@ impl EncapsKey {
         &self,
         c: &mut [u8; Self::CIPHERTEXT_SIZE],
         k: &mut [u8; 32],
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl rand_core::CryptoRng,
     ) {
         let mut m = [0u8; 32];
         rng.fill_bytes(&mut m);
@@ -842,7 +841,7 @@ fn cmov<const N: usize>(dst: &mut [u8; N], src: &[u8; N], cond: u32) {
 }
 
 /// Algorithm 19 ML-KEM.KeyGen()
-pub fn keygen(rng: &mut impl CryptoRngCore) -> (EncapsKey, DecapsKey) {
+pub fn keygen(rng: &mut impl rand_core::CryptoRng) -> (EncapsKey, DecapsKey) {
     let mut d = [0u8; 32];
     rng.fill_bytes(&mut d);
 
@@ -867,7 +866,6 @@ fn keygen_deterministic(d: [u8; 32], z: [u8; 32]) -> (EncapsKey, DecapsKey) {
 
 #[cfg(test)]
 mod tests {
-    use rand_core::OsRng;
     use serde::Deserialize;
     use std::{fs::read_to_string, path::PathBuf};
 
@@ -978,10 +976,11 @@ mod tests {
 
     #[test]
     fn test_kem_random() {
-        let (ek, dk) = keygen(&mut OsRng);
+        let mut rng = rand::rng();
+        let (ek, dk) = keygen(&mut rng);
         let mut c = [0u8; EncapsKey::CIPHERTEXT_SIZE];
         let mut k = [0u8; 32];
-        ek.encaps(&mut c, &mut k, &mut OsRng);
+        ek.encaps(&mut c, &mut k, &mut rng);
 
         let mut k_prime = [0u8; 32];
         dk.decaps(&mut k_prime, &ek, &c);
@@ -989,7 +988,7 @@ mod tests {
         assert_eq!(&k, &k_prime);
     }
 
-    fn gen_rand_bytes<const N: usize>(rng: &mut impl CryptoRngCore) -> [u8; N] {
+    fn gen_rand_bytes<const N: usize>(rng: &mut impl rand::CryptoRng) -> [u8; N] {
         let mut bytes = [0; N];
         rng.fill_bytes(&mut bytes);
         bytes
@@ -997,13 +996,13 @@ mod tests {
 
     #[test]
     fn test_compress() {
-        let compr_pvec = gen_rand_bytes(&mut OsRng);
+        let compr_pvec = gen_rand_bytes(&mut rand::rng());
         let mut compr_pvec_prime = [0; PolyVec::COMPRESSED_BYTES];
         let pvec = PolyVec::decompress(&compr_pvec);
         pvec.compress(&mut compr_pvec_prime);
         assert_eq!(&compr_pvec, &compr_pvec_prime);
 
-        let compr_poly = gen_rand_bytes(&mut OsRng);
+        let compr_poly = gen_rand_bytes(&mut rand::rng());
         let mut compr_poly_prime = [0; Poly::COMPRESSED_BYTES];
         let poly = Poly::decompress(&compr_poly);
         poly.compress(&mut compr_poly_prime);

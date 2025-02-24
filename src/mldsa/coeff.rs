@@ -103,11 +103,7 @@ pub const fn use_hint_32(h: usize, r: i32) -> i32 {
         return r1;
     }
 
-    if r0 > 0 {
-        (r1 + 1) & 15
-    } else {
-        (r1 - 1) & 15
-    }
+    if r0 > 0 { (r1 + 1) & 15 } else { (r1 - 1) & 15 }
 }
 
 pub const fn make_hint(z: i32, r: i32, gamma2: i32) -> usize {

@@ -1,4 +1,4 @@
-use core::mem::{transmute, transmute_copy, MaybeUninit};
+use core::mem::{MaybeUninit, transmute, transmute_copy};
 
 pub const SHAKE_128_RATE: usize = 168;
 pub const SHAKE_256_RATE: usize = 136;
