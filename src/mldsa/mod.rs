@@ -1,13 +1,13 @@
 //! Implementation of ML-DSA (FIPS-204).
 
-use crate::hash;
-use core::{
-    array,
-    mem::{MaybeUninit, transmute, transmute_copy},
-    ops::{AddAssign, Mul, MulAssign, SubAssign},
-};
+use core::array;
+use core::mem::{MaybeUninit, transmute, transmute_copy};
+use core::ops::{AddAssign, Mul, MulAssign, SubAssign};
+
 use thiserror::Error;
 use zeroize::Zeroize;
+
+use crate::hash;
 
 pub mod mldsa44;
 pub mod mldsa65;
@@ -1507,9 +1507,11 @@ fn expand_s<const K: usize, const L: usize, const ETA: usize>(
 
 #[cfg(test)]
 mod tests {
+    use std::fs::read_to_string;
+    use std::path::PathBuf;
+
     use rand::RngCore;
     use serde::Deserialize;
-    use std::{fs::read_to_string, path::PathBuf};
 
     use super::*;
 

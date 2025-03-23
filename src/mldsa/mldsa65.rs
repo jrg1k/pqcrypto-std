@@ -1,11 +1,12 @@
 //! ML-DSA-65 parameter set.
 
+use core::mem::{MaybeUninit, transmute};
+
 use super::{
     Poly, PolyVec, Q, SigningKeyInternal, VerifyingKeyInternal, bitlen, coeff,
     privkey_size, pubkey_size, sig_size,
 };
 use crate::hash;
-use core::mem::{MaybeUninit, transmute};
 
 const K: usize = 6;
 const L: usize = 5;

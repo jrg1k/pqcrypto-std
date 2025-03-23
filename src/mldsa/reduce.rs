@@ -39,8 +39,9 @@ pub const fn barrett_reduce(a: i32) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rand::Rng;
+
+    use super::*;
     #[test]
     fn test_barret_reduce() {
         for _ in 0..10000 {

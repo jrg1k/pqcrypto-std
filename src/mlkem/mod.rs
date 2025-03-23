@@ -2,15 +2,14 @@
 mod compress;
 mod reduce;
 
+use core::array;
+use core::fmt::Display;
+use core::hint::black_box;
+use core::mem::{self, MaybeUninit, transmute};
+use core::ops::{AddAssign, Mul, SubAssign};
+
 use compress::{
     compr_1bit, compr_4bit, compr_10bit, decompr_1bit, decompr_4bit, decompr_10bit,
-};
-use core::{
-    array,
-    fmt::Display,
-    hint::black_box,
-    mem::{self, MaybeUninit, transmute},
-    ops::{AddAssign, Mul, SubAssign},
 };
 
 use crate::hash;
@@ -866,8 +865,10 @@ fn keygen_deterministic(d: [u8; 32], z: [u8; 32]) -> (EncapsKey, DecapsKey) {
 
 #[cfg(test)]
 mod tests {
+    use std::fs::read_to_string;
+    use std::path::PathBuf;
+
     use serde::Deserialize;
-    use std::{fs::read_to_string, path::PathBuf};
 
     use super::*;
 
